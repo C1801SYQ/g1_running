@@ -1,6 +1,10 @@
 # G1 29-DOF Running RL
 
-Based on [Zolkin1/robot_rl](https://github.com/Zolkin1/robot_rl) and [fan-ziqi/rl_sar](https://github.com/fan-ziqi/rl_sar).
+基于以下开源项目改编：
+- [Zolkin1/robot_rl](https://github.com/Zolkin1/robot_rl) — IsaacLab RL 训练框架
+- [fan-ziqi/rl_sar](https://github.com/fan-ziqi/rl_sar) — 仿真验证与实体部署框架 (Apache 2.0)
+
+本项目沿用 Apache 2.0 协议。
 
 ## robot_rl/ - Training
 G1 29-dof running policy training using IsaacLab + RSL-RL.
