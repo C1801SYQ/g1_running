@@ -1,0 +1,39 @@
+"""Sim2Sim: Run 29dof G1 policy in MuJoCo using proven robot_rl infrastructure."""
+import numpy as np, os, sys, pathlib
+
+# Use existing transfer/sim infrastructure (proven to work)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'transfer', 'sim'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'transfer'))
+from rl_policy import RLPolicy
+from robot import Robot
+from simulation import Simulation
+
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--vx", type=float, default=3.0)
+parser.add_argument("--headless", action="store_true")
+args = parser.parse_args()
+
+# Load policy (uses existing RLPolicy class)
+log = str(pathlib.Path(__file__).parent.parent /
+          'logs/g1_policies/running-clf-29dof/running_clf_29dof/2026-07-16_15-53-29')
+p = RLPolicy(f'{log}/exported/policy_parameters.yaml', f'{log}/exported/policy.pt')
+p.load()
+
+# Use our position-actuator converted 29dof scene
+robot = Robot('g1_21j', '29dof_scene', np.array([1,1,1]), None, False,
+              {'kp_y': 3.0, 'kd_y': 0.5, 'kp_yaw': 1.5, 'kd_yaw': 0.5})
+robot.input_function = lambda t: np.array([args.vx, 0.0, 0.0])
+robot.set_initial_condition(p)
+
+print(f"\n{'='*60}")
+print(f"  Sim2Sim Running: vx={args.vx:.1f} m/s")
+print(f"{'='*60}\n")
+
+sim = Simulation(p, robot, tracking_body_name='torso_link')
+
+if args.headless:
+    success = sim.run_headless(total_time=30)
+    print(f"Result: {'OK' if success else 'FELL'}")
+else:
+    sim.run(-1)

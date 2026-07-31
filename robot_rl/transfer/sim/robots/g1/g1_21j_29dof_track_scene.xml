@@ -1,0 +1,106 @@
+<mujoco model="g1_29dof track scene">
+  <include file="g1_29dof.xml"/>
+
+  <statistic center="55 0 0.8" extent="60"/>
+
+  <visual>
+    <global offwidth="1920" offheight="1080" azimuth="-130" elevation="-20"/>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.9" rgb2="0.05 0.1 0.2" width="512" height="3072"/>
+
+    <!-- Blue track surface texture -->
+    <texture type="2d" name="track_tex" builtin="flat" rgb1="0.05 0.3 0.6" rgb2="0.05 0.3 0.6" width="64" height="64"/>
+    <material name="track_mat" texture="track_tex" reflectance="0.1"/>
+
+    <!-- Operation zone texture (green-grey) -->
+    <texture type="2d" name="zone_tex" builtin="flat" rgb1="0.15 0.6 0.3" rgb2="0.15 0.6 0.3" width="64" height="64"/>
+    <material name="zone_mat" texture="zone_tex" reflectance="0.05"/>
+
+    <!-- Surrounding ground texture (grass-like brown-green) -->
+    <texture type="2d" name="ground_tex" builtin="checker" mark="edge" rgb1="0.25 0.45 0.2" rgb2="0.2 0.4 0.18" markrgb="0.15 0.3 0.12" width="300" height="300"/>
+    <material name="ground_mat" texture="ground_tex" texuniform="true" texrepeat="20 20" reflectance="0.05"/>
+  </asset>
+
+  <worldbody>
+    <light pos="55 0 20" dir="0 0 -1" directional="false" castshadow="true" intensity="2.0"/>
+
+    <!-- Physical floor (infinite plane, same pattern as basic_scene) -->
+    <geom name="floor" type="plane" size="0 0 0.05"
+          material="track_mat" friction="0.7 0.5 0.5"/>
+
+    <!-- Inner operation zone: Y = -5.70 to -4.20 (1.5m wide), visual only -->
+    <geom name="zone_inner" type="box" size="60 0.75 0.005"
+          pos="55 -4.95 0.005" material="zone_mat" group="2" contype="0" conaffinity="0"/>
+
+    <!-- Outer operation zone: Y = 4.20 to 5.70 (1.5m wide), visual only -->
+    <geom name="zone_outer" type="box" size="60 0.75 0.005"
+          pos="55 4.95 0.005" material="zone_mat" group="2" contype="0" conaffinity="0"/>
+
+    <!-- Blue track surface: Y = -4.20 to 4.20, X = -10 to 120, visual only -->
+    <geom name="track_surface" type="box" size="65 4.2 0.005"
+          pos="55 0 0.005" material="track_mat" group="2" contype="0" conaffinity="0"/>
+
+    <!-- ===== Lane Lines: 10cm wide (0.05m half-size), at Z=0.011 ===== -->
+
+    <!-- Inner edge line at Y=-4.20 (10cm wide, 5mm thick) -->
+    <geom name="line_inner" type="box" size="65 0.05 0.003"
+          pos="55 -4.2 0.013" rgba="1 1 1 1" group="2" contype="0" conaffinity="0"/>
+
+    <!-- Lane 1-2 line at Y=-2.10 -->
+    <geom name="line_1_2" type="box" size="65 0.05 0.003"
+          pos="55 -2.1 0.013" rgba="1 1 1 1" group="2" contype="0" conaffinity="0"/>
+
+    <!-- Lane 2-3 line at Y=0.00 (center) -->
+    <geom name="line_2_3" type="box" size="65 0.05 0.003"
+          pos="55 0.0 0.013" rgba="1 1 1 1" group="2" contype="0" conaffinity="0"/>
+
+    <!-- Lane 3-4 line at Y=2.10 -->
+    <geom name="line_3_4" type="box" size="65 0.05 0.003"
+          pos="55 2.1 0.013" rgba="1 1 1 1" group="2" contype="0" conaffinity="0"/>
+
+    <!-- Outer edge line at Y=4.20 -->
+    <geom name="line_outer" type="box" size="65 0.05 0.003"
+          pos="55 4.2 0.013" rgba="1 1 1 1" group="2" contype="0" conaffinity="0"/>
+
+    <!-- ===== Start and Finish Lines (across all lanes) ===== -->
+
+    <!-- Start line at X=0 (5cm wide white stripe across track) -->
+    <geom name="start_line" type="box" size="0.025 4.2 0.003"
+          pos="0 0.0 0.013" rgba="1 1 1 1" group="2" contype="0" conaffinity="0"/>
+
+    <!-- Finish line at X=100 (5cm wide white stripe across track) -->
+    <geom name="finish_line" type="box" size="0.025 4.2 0.003"
+          pos="100 0.0 0.013" rgba="1 1 1 1" group="2" contype="0" conaffinity="0"/>
+
+    <!-- Start line label marker (text not available in MJCF, use colored box) -->
+    <geom name="start_marker" type="box" size="0.05 0.1 0.001"
+          pos="-0.1 0.0 0.012" rgba="0 1 0 1" group="2" contype="0" conaffinity="0"/>
+
+    <!-- Finish line label marker -->
+    <geom name="finish_marker" type="box" size="0.05 0.1 0.001"
+          pos="100.1 0.0 0.012" rgba="1 0 0 1" group="2" contype="0" conaffinity="0"/>
+
+    <!-- ===== Lane number markers at start ===== -->
+
+    <!-- Lane 1 marker -->
+    <geom name="lane1_marker" type="box" size="0.1 0.1 0.001"
+          pos="-0.1 -3.15 0.012" rgba="1 0.8 0 0.8" group="2" contype="0" conaffinity="0"/>
+
+    <!-- Lane 2 marker -->
+    <geom name="lane2_marker" type="box" size="0.1 0.1 0.001"
+          pos="-0.1 -1.05 0.012" rgba="1 0.8 0 0.8" group="2" contype="0" conaffinity="0"/>
+
+    <!-- Lane 3 marker -->
+    <geom name="lane3_marker" type="box" size="0.1 0.1 0.001"
+          pos="-0.1 1.05 0.012" rgba="1 0.8 0 0.8" group="2" contype="0" conaffinity="0"/>
+
+    <!-- Lane 4 marker -->
+    <geom name="lane4_marker" type="box" size="0.1 0.1 0.001"
+          pos="-0.1 3.15 0.012" rgba="1 0.8 0 0.8" group="2" contype="0" conaffinity="0"/>
+
+  </worldbody>
+</mujoco>

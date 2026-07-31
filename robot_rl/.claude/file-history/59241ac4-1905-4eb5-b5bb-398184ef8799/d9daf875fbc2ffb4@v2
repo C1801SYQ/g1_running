@@ -1,0 +1,17 @@
+"""Run 29dof in MuJoCo with controllable speed via joystick."""
+import numpy as np, os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from rl_policy import RLPolicy
+from robot import Robot
+from simulation import Simulation
+
+import pathlib
+log=str(pathlib.Path(__file__).parent.parent.parent / 'logs/g1_policies/running-clf-29dof/running_clf_29dof/2026-07-15_11-20-39')
+p=RLPolicy(f'{log}/exported/policy_parameters.yaml',f'{log}/exported/policy.pt')
+p.load()
+
+# Use joystick if available, otherwise fixed speed
+r=Robot('g1_21j','29dof_scene',np.array([1,1,1]),None,False,
+        {'kp_y':1.5,'kd_y':0.3,'kp_yaw':0.8,'kd_yaw':0.3})
+
+Simulation(p,r,tracking_body_name='torso_link').run(-1)

@@ -1,0 +1,185 @@
+"""G1 29dof Policy Controller - subscribes to MuJoCo DDS, publishes motor commands."""
+import numpy as np, time, os, sys, struct, yaml
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize
+from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
+from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_, unitree_hg_msg_dds__LowState_
+import onnxruntime as ort
+
+# ====== Load Policy ======
+class ONNXPolicy:
+    def __init__(self, onnx_path, params_path):
+        self.sess = ort.InferenceSession(onnx_path)
+        self.inp = self.sess.get_inputs()[0].name
+        self.out = self.sess.get_outputs()[0].name
+        with open(params_path) as f:
+            self.params = yaml.safe_load(f)
+        self.num_actions = self.params["num_actions"]
+        self.default_q = np.array(self.params["default_joint_angles"], dtype=np.float32)
+        self.joint_names = self.params["joint_names_isaac"]
+        # Build action scale
+        self.scale = np.ones(self.num_actions, dtype=np.float32)
+        for pat, s in self.params.get("action_scale", {}).items():
+            import re
+            for i, n in enumerate(self.joint_names):
+                if re.match(pat, n):
+                    self.scale[i] = s
+        print(f"[Policy] {self.num_actions} actions, scale={self.scale.mean():.3f}")
+
+    def __call__(self, obs):
+        return self.sess.run([self.out], {self.inp: obs.reshape(1, -1).astype(np.float32)})[0].flatten()
+
+# ====== Load Policy ======
+script_dir = os.path.dirname(os.path.abspath(__file__))
+policy = ONNXPolicy(
+    os.path.join(script_dir, "policy.onnx"),
+    os.path.join(script_dir, "policy_parameters.yaml"),
+)
+
+# ====== DDS ======
+DOMAIN = 1
+ChannelFactoryInitialize(DOMAIN, "lo")
+
+# G1 motor IDs: 35 slots, 0-28 used for 29dof, 29-34 unused
+NUM_MOTORS = 35
+
+# Isaac -> DDS motor index map (G1 29dof)
+# Isaac order: [left_hip_pitch, right_hip_pitch, waist_yaw, left_hip_roll, right_hip_roll,
+#               left_shoulder_pitch, right_shoulder_pitch, left_hip_yaw, right_hip_yaw,
+#               left_shoulder_roll, right_shoulder_roll, left_knee, right_knee,
+#               left_shoulder_yaw, right_shoulder_yaw, left_ankle_pitch, right_ankle_pitch,
+#               left_elbow, right_elbow, left_ankle_roll, right_ankle_roll,
+#               waist_roll, waist_pitch, left_wrist_roll, left_wrist_pitch,
+#               left_wrist_yaw, right_wrist_roll, right_wrist_pitch, right_wrist_yaw]
+# DDS order (from unitree doc): 0-28 = leg(12) + waist(3) + arm(7+7) = 29
+# We need to map IsaacLab joint names to DDS motor indices
+DDS_JOINT_ORDER = [
+    "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
+    "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+    "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
+    "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+    "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+    "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+    "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+    "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+]
+
+# Build Isaac -> DDS map
+isaac_to_dds = np.zeros(policy.num_actions, dtype=int)
+for isaac_idx, isaac_name in enumerate(policy.joint_names):
+    for dds_idx, dds_name in enumerate(DDS_JOINT_ORDER):
+        if isaac_name == dds_name:
+            isaac_to_dds[isaac_idx] = dds_idx
+            break
+
+print(f"[Ctrl] Joint map built: {policy.num_actions} joints")
+
+# PD gains
+Kp = 40.0  # position gain
+Kd = 2.0   # velocity gain
+
+# State
+last_action = np.zeros(policy.num_actions, dtype=np.float32)
+vx_cmd = 3.0
+
+def quat_to_projected_gravity(q):
+    """q = [w,x,y,z]"""
+    return np.array([
+        2*(-q[2]*q[1] + q[0]*q[3]),
+        -2*(q[2]*q[3] + q[0]*q[1]),
+        1 - 2*(q[0]*q[0] + q[2]*q[2])
+    ], dtype=np.float32)
+
+def rot_body_ang_vel(q, w_global):
+    """Convert angular vel to body frame"""
+    qw, qx, qy, qz = q
+    R = np.array([
+        [1-2*qy**2-2*qz**2, 2*qx*qy+2*qz*qw, 2*qx*qz-2*qy*qw],
+        [2*qx*qy-2*qz*qw, 1-2*qx**2-2*qz**2, 2*qy*qz+2*qx*qw],
+        [2*qx*qz+2*qy*qw, 2*qy*qz-2*qx*qw, 1-2*qx**2-2*qy**2]
+    ])
+    return R @ w_global
+
+low_cmd = unitree_hg_msg_dds__LowCmd_()
+low_cmd_puber = ChannelPublisher("rt/lowcmd", LowCmd_)
+low_cmd_puber.Init()
+
+def LowStateHandler(msg: LowState_):
+    global last_action
+    t = time.time()
+
+    # Read motor states from DDS
+    motor_q = np.zeros(policy.num_actions)
+    motor_dq = np.zeros(policy.num_actions)
+    for dds_idx in range(policy.num_actions):
+        motor_q[dds_idx] = msg.motor_state[dds_idx].q
+        motor_dq[dds_idx] = msg.motor_state[dds_idx].dq
+
+    # IMU
+    quat = np.array(msg.imu_state.quaternion)  # [w,x,y,z]
+    gyro = np.array(msg.imu_state.gyroscope)
+    acc = np.array(msg.imu_state.accelerometer)
+
+    # Reorder joints to IsaacLab order
+    q_isaac = np.zeros(policy.num_actions)
+    dq_isaac = np.zeros(policy.num_actions)
+    for isaac_idx, dds_idx in enumerate(isaac_to_dds):
+        q_isaac[isaac_idx] = motor_q[dds_idx]
+        dq_isaac[isaac_idx] = motor_dq[dds_idx]
+
+    # Build observation (98 dims)
+    base_ang_vel = rot_body_ang_vel(quat, gyro)       # 3
+    proj_gravity = quat_to_projected_gravity(quat)     # 3
+    vel_cmd = np.array([vx_cmd, 0.0, 0.0])             # 3
+    joint_pos = q_isaac - policy.default_q             # 29
+    joint_vel = dq_isaac                                # 29
+    last_act = last_action                              # 29
+    phi = (t % 0.5) / 0.5
+    sin_phi = np.array([np.sin(2*np.pi*phi)])          # 1
+    cos_phi = np.array([np.cos(2*np.pi*phi)])          # 1
+
+    obs = np.concatenate([base_ang_vel, proj_gravity, vel_cmd,
+                          joint_pos, joint_vel, last_act, sin_phi, cos_phi])
+    obs = obs.astype(np.float32)
+
+    # Policy inference
+    action = policy(obs)
+    target_q = policy.default_q + policy.scale * action
+    last_action = action.copy()
+
+    # Publish LowCmd (PD position control: ctrl = tau + kp*(q_target - q) + kd*(dq_target - dq))
+    for dds_idx in range(35):
+        low_cmd.motor_cmd[dds_idx].mode = 1       # enable
+        low_cmd.motor_cmd[dds_idx].q = 0.0         # not used in PD mode
+        low_cmd.motor_cmd[dds_idx].dq = 0.0
+        low_cmd.motor_cmd[dds_idx].kp = Kp
+        low_cmd.motor_cmd[dds_idx].kd = Kd
+        low_cmd.motor_cmd[dds_idx].tau = 0.0
+
+    # Set targets for actuated joints
+    for isaac_idx, dds_idx in enumerate(isaac_to_dds):
+        low_cmd.motor_cmd[dds_idx].q = float(target_q[isaac_idx])
+        low_cmd.motor_cmd[dds_idx].kp = Kp
+        low_cmd.motor_cmd[dds_idx].kd = Kd
+
+    low_cmd_puber.Write(low_cmd)
+    if int(t) % 5 == 0 and int(t) != getattr(LowStateHandler, '_last_print', -1):
+        LowStateHandler._last_print = int(t)
+        print(f"  t={t:.0f}s | vx_cmd={vx_cmd:.1f} m/s")
+
+lowstate_suber = ChannelSubscriber("rt/lowstate", LowState_)
+lowstate_suber.Init(LowStateHandler, 10)
+
+print(f"\n{'='*60}")
+print(f"  G1 29dof Policy Controller Running")
+print(f"  vx={vx_cmd:.1f} m/s")
+print(f"  Waiting for MuJoCo DDS...")
+print(f"{'='*60}\n")
+
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    print("\n[Ctrl] Stopped")

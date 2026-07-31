@@ -1,0 +1,121 @@
+"""Record MuJoCo simulation to MP4 video."""
+import argparse
+import os
+import sys
+import numpy as np
+
+import mujoco
+from mujoco import renderer as mujoco_renderer
+
+from rl_policy import RLPolicy
+from robot import Robot
+
+EXPERIMENT_NAMES = {
+    "running_clf_sym": "running-clf-symmetric",
+}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--env_type", type=str, required=True)
+    parser.add_argument("--scene", type=str, default="29dof_basic_scene")
+    parser.add_argument("--duration", type=float, default=30.0)
+    parser.add_argument("--fps", type=int, default=50)
+    parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--resolution", type=str, default="1280,720")
+    parser.add_argument("--sim_speed", type=str, default="3.0,0.0,0.0",
+                       help="Commanded velocity as vx,vy,vyaw (e.g., '3.0,0.0,0.0')")
+    args = parser.parse_args()
+
+    # Find latest run
+    experiment_name = EXPERIMENT_NAMES[args.env_type]
+    log_root = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "logs", "g1_policies", experiment_name, args.env_type
+    )
+    run_dirs = sorted([d for d in os.listdir(log_root) if os.path.isdir(os.path.join(log_root, d))])
+    run_dir = os.path.join(log_root, run_dirs[-1])
+    exported_dir = os.path.join(run_dir, "exported")
+    policy_path = os.path.join(exported_dir, "policy.pt")
+    param_path = os.path.join(exported_dir, "policy_parameters.yaml")
+
+    # Output path
+    if args.output is None:
+        args.output = os.path.join(run_dir, f"mujoco_video_{args.env_type}.mp4")
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+
+    print(f"[INFO] Loading policy from: {policy_path}")
+    policy = RLPolicy(param_path, policy_path)
+    policy.load()
+
+    # Create robot
+    robot = Robot(
+        robot_name="g1_21j",
+        scene_name=args.scene,
+        joystick_scaling=np.array([1, 1, 1]),
+        input_function=None,
+        use_pd=False,
+        gains={"kp_y": 1.5, "kd_y": 0.3, "kp_yaw": 0.8, "kd_yaw": 0.3},
+    )
+
+    # Setup offscreen renderer
+    res_w, res_h = map(int, args.resolution.split(","))
+    renderer = mujoco_renderer.Renderer(robot.mj_model, height=res_h, width=res_w)
+
+    # Setup tracking camera
+    camera = mujoco.MjvCamera()
+    camera.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+    track_id = mujoco.mj_name2id(robot.mj_model, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
+    camera.trackbodyid = track_id if track_id >= 0 else 0
+    camera.distance = 2.5
+    camera.elevation = -10
+    camera.azimuth = 90
+
+    # Simulation parameters
+    policy_dt = policy.get_dt()
+    sim_steps_per_policy_update = int(policy_dt / robot.mj_model.opt.timestep)
+    fps = args.fps
+    video_steps_per_frame = max(1, int(1.0 / (fps * robot.mj_model.opt.timestep)))
+    total_steps = int(args.duration / robot.mj_model.opt.timestep)
+
+    print(f"[INFO] Recording {args.duration}s video at {fps}fps, {res_w}x{res_h}")
+    print(f"[INFO] Output: {args.output}")
+
+    robot.set_pd_gains_from_policy(policy)
+
+    import cv2
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(args.output, fourcc, fps, (res_w, res_h))
+
+    obs = None
+    action = None
+    for step in range(total_steps):
+        # Policy update at control rate
+        if step % sim_steps_per_policy_update == 0:
+            obs = robot.create_observation(policy)
+            action = policy.get_action(obs, robot.joint_names)
+            robot.apply_action(action)
+
+            if robot.failed():
+                print(f"\n[WARN] Robot fell at t={robot.mj_data.time:.2f}s")
+                break
+
+        # Step physics
+        robot.step()
+
+        # Render frame at video fps
+        if step % video_steps_per_frame == 0:
+            renderer.update_scene(robot.mj_data, camera=camera)
+            pixels = renderer.render()
+            writer.write(cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR))
+
+        if step % 1000 == 0:
+            print(f"\r  Recording... t={robot.mj_data.time:.1f}s / {args.duration}s", end="", flush=True)
+
+    writer.release()
+    renderer.close()
+    print(f"\n[INFO] Video saved to: {args.output}")
+
+
+if __name__ == "__main__":
+    main()

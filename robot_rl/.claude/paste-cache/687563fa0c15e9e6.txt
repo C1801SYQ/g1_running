@@ -1,0 +1,170 @@
+你现在帮我从零重新配置 Zolkin1/robot_rl 仓库，用于 Unitree G1 的 running_clf_sym 训练。
+
+我的系统环境：
+- Ubuntu 22.04
+- IsaacLab 路径：/home/ubuntu/IsaacLab
+- conda 环境：env_isaaclab
+- 目标仓库：https://github.com/Zolkin1/robot_rl
+- 目标任务：running_clf_sym
+- 目标：先让下面命令跑通到训练循环，不要求长时间训练：
+
+conda activate env_isaaclab
+cd /home/ubuntu/robot_rl
+python scripts/rsl_rl/train_policy.py \
+  --env_type=running_clf_sym \
+  --headless \
+  --num_envs=256 \
+  --max_iterations=1
+
+请你按以下要求执行：
+
+一、重新 clone 仓库
+1. 如果 /home/ubuntu/robot_rl 已存在，先备份或删除后重新 clone。
+2. 正确 clone 命令是：
+   git clone https://github.com/Zolkin1/robot_rl.git
+3. 不要使用 https://github.com/Zolkin1/robot_rl/tree/main 这个网页链接 clone。
+
+二、使用正确 Python 环境
+1. 使用 conda activate env_isaaclab。
+2. 确认 python 来自：
+   /home/ubuntu/anaconda3/envs/env_isaaclab/bin/python
+3. 不要用 base 环境安装或运行。
+4. 在 /home/ubuntu/robot_rl 下执行：
+   python -m pip install -e source/robot_rl/
+
+三、RSL-RL 版本
+robot_rl 当前要求 rsl-rl-lib==3.0.1。
+如果当前版本不是 3.0.1，请用 IsaacLab 的脚本安装：
+
+cd /home/ubuntu/IsaacLab
+./isaaclab.sh -p -m pip install rsl-rl-lib==3.0.1
+
+然后回到：
+cd /home/ubuntu/robot_rl
+
+四、Hugging Face 轨迹库
+训练 running_clf_sym 会下载轨迹库：
+
+repo_id: zolkin/robot_rl
+path: trajectories/running/2026-02-23_12-17-04_running_config
+
+我的网络访问 huggingface.co 可能会失败，所以请优先使用镜像：
+
+export HF_ENDPOINT=https://hf-mirror.com
+
+然后用 Python 下载：
+
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="zolkin/robot_rl",
+    allow_patterns="trajectories/running/2026-02-23_12-17-04_running_config/*",
+    local_dir="/home/ubuntu/robot_rl/hf",
+)
+
+下载后检查这个文件是否存在：
+
+/home/ubuntu/robot_rl/hf/trajectories/running/2026-02-23_12-17-04_running_config/running_config_solution.yaml
+
+如果存在，说明轨迹库缓存成功。训练时应该显示：
+Using cached trajectory library from ...
+
+五、IsaacLab API 兼容补丁
+我之前遇到过两个 API 兼容问题，请你提前检查并用最小补丁修复。
+
+需要修改的文件：
+
+/home/ubuntu/robot_rl/source/robot_rl/robot_rl/tasks/manager_based/robot_rl/mdp/events/physical_randomization.py
+
+补丁 1：
+原代码可能有：
+
+from isaaclab.envs.mdp.events import _validate_scale_range, _randomize_prop_by_op
+
+但我当前 IsaacLab 里可能没有 _validate_scale_range。
+请改成兼容写法：
+
+try:
+    from isaaclab.envs.mdp.events import _validate_scale_range, _randomize_prop_by_op
+except ImportError:
+    from isaaclab.envs.mdp.events import _randomize_prop_by_op
+
+    def _validate_scale_range(params, name, *, allow_negative=False, allow_zero=True):
+        if params is None:
+            return
+        if not isinstance(params, tuple) or len(params) != 2:
+            raise TypeError(f"{name} must be a tuple of two numbers, got: {params}")
+        low, high = params
+        if low > high:
+            raise ValueError(f"{name} lower bound must be <= upper bound, got: {params}")
+        if not allow_negative and low < 0:
+            raise ValueError(f"{name} lower bound must be >= 0, got: {params}")
+        if not allow_zero and low <= 0:
+            raise ValueError(f"{name} lower bound must be > 0, got: {params}")
+
+补丁 2：
+我之前还遇到过：
+
+TypeError: Articulation.write_joint_friction_coefficient_to_sim() got an unexpected keyword argument 'joint_dynamic_friction_coeff'
+
+也就是当前 IsaacLab 的 Articulation.write_joint_friction_coefficient_to_sim() 可能不支持：
+- joint_dynamic_friction_coeff
+- joint_viscous_friction_coeff
+
+请你在 physical_randomization.py 中找到类似调用：
+
+self.asset.write_joint_friction_coefficient_to_sim(
+    joint_friction_coeff=static_friction_coeff,
+    joint_dynamic_friction_coeff=dynamic_friction_coeff,
+    joint_viscous_friction_coeff=viscous_friction_coeff,
+    joint_ids=joint_ids,
+    env_ids=env_ids,
+)
+
+改成兼容逻辑：
+1. 优先尝试原始调用。
+2. 如果 TypeError 提示不支持 joint_dynamic_friction_coeff 或 joint_viscous_friction_coeff，就 fallback 到只写 static friction：
+
+self.asset.write_joint_friction_coefficient_to_sim(
+    joint_friction_coeff=static_friction_coeff,
+    joint_ids=joint_ids,
+    env_ids=env_ids,
+)
+
+请不要大规模重构，只做最小兼容补丁。
+每次改文件前先备份，例如：
+physical_randomization.py.bak_claude
+
+六、测试命令
+补丁完成后重新安装：
+
+cd /home/ubuntu/robot_rl
+python -m pip install -e source/robot_rl/
+
+然后先跑小规模测试：
+
+export HF_ENDPOINT=https://hf-mirror.com
+export WANDB_MODE=offline
+
+python scripts/rsl_rl/train_policy.py \
+  --env_type=running_clf_sym \
+  --headless \
+  --num_envs=256 \
+  --max_iterations=1
+
+如果能看到 Learning iteration、fps、reward 等训练输出，就说明第一阶段成功。
+
+七、注意事项
+1. 不要重装 IsaacLab。
+2. 不要重装 IsaacSim。
+3. 不要换 conda 环境。
+4. 不要先跑 4096，先用 256 和 max_iterations=1 验证。
+5. 以下 warning 先不用处理：
+   - Warp CUDA error
+   - Intel GPU warning
+   - CPU powersave warning
+   - modify_collision_properties warning
+   - conda-anaconda-tos / pydantic_core warning
+6. 真正需要处理的是 Python Traceback 最后一段。
+7. 如果出现新的 IsaacLab API 兼容错误，请继续用最小补丁方式处理，不要大改项目结构。
+8. 每一步执行完，请告诉我当前进展、改了哪些文件、下一个错误是什么。

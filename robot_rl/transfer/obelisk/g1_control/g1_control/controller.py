@@ -1,0 +1,536 @@
+import os
+from abc import ABC
+
+import numpy as np
+import torch
+from datetime import datetime
+import time
+import csv
+import shutil
+from collections import deque
+from ament_index_python.packages import get_package_share_directory
+
+from .behavior_manager import BehaviorManager
+from obelisk_control_msgs.msg import PDFeedForward, VelocityCommand
+from obelisk_estimator_msgs.msg import EstimatedState
+from obelisk_py.core.control import ObeliskController
+from obelisk_py.core.obelisk_typing import ObeliskControlMsg, is_in_bound
+from obelisk_py.core.utils.ros import spin_obelisk
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.lifecycle import LifecycleState, TransitionCallbackReturn
+from sensor_msgs.msg import Joy
+
+# Changes TODO:
+# - Take a list of hugging face policies
+# - Also need to make sure we get the associated config files with the policies
+# - Make the observations modular to be built based on config file
+# - Handle holding multiple policies
+# - Add a generic state machine for multiple skills that can be extended in the future
+# - 
+
+
+class VelocityTrackingController(ObeliskController, ABC):
+    """Locomotion controller to track a given velocity."""
+
+    def __init__(self, node_name: str = "velocity_tracking_controller") -> None:
+        """Initialize the example position setpoint controller."""
+        super().__init__(node_name, PDFeedForward, EstimatedState)
+        # Load policy
+        self.declare_parameter("hf_repo_ids", [""])
+        self.declare_parameter("hf_policy_folders", [""])
+        self.declare_parameter("behavior_names", [""])
+        self.declare_parameter("behavior_buttons", [-1])
+        self.declare_parameter("init_behavior", "")
+        self.declare_parameter("vel_thresholds", [0.0])
+
+        hf_repo_ids = self.get_parameter("hf_repo_ids").get_parameter_value().string_array_value
+        hf_policy_folders = self.get_parameter("hf_policy_folders").get_parameter_value().string_array_value
+        behavior_names = self.get_parameter("behavior_names").get_parameter_value().string_array_value
+        behavior_buttons = self.get_parameter("behavior_buttons").get_parameter_value().integer_array_value
+        init_behavior = self.get_parameter("init_behavior").get_parameter_value().string_value
+        vel_thresholds = self.get_parameter("vel_thresholds").get_parameter_value().double_array_value
+
+        self.declare_parameter("START_IN_SIM", False)
+        self.activate_policy = self.get_parameter("START_IN_SIM").get_parameter_value().bool_value
+
+        if self.activate_policy:
+            self.get_logger().warn("STARTING IN POLICY - BEWARE!")
+
+        self.behavior_manager = BehaviorManager(
+            behavior_names=behavior_names,
+            behavior_buttons=behavior_buttons,
+            init_behavior=init_behavior,
+            vel_thresholds=vel_thresholds,
+            hf_repo_ids=hf_repo_ids,
+            hf_policy_folders=hf_policy_folders,
+        )
+        self.active_behavior = self.behavior_manager.active_behavior
+
+        for policy, behavior_name in zip(self.behavior_manager.policies, self.behavior_manager.behavior_names):
+            self.get_logger().info(f"Loaded behavior {behavior_name} at {policy.get_policy_path()}.")
+
+
+        # 29-dof mapping: Isaac order → G1 Obelisk joint order
+        # G1 order: [L hip_pitch/roll/yaw/knee/ankle_pitch/ankle_roll,
+        #            R hip_pitch/roll/yaw/knee/ankle_pitch/ankle_roll,
+        #            waist_yaw/roll/pitch,
+        #            L shoulder_pitch/roll/yaw/elbow/wrist_roll/wrist_pitch/wrist_yaw,
+        #            R shoulder_pitch/roll/yaw/elbow/wrist_roll/wrist_pitch/wrist_yaw]
+        self.isaac_to_mujoco = {
+            0: 0,   # left_hip_pitch
+            1: 6,   # right_hip_pitch
+            2: 12,  # waist_yaw
+            3: 1,   # left_hip_roll
+            4: 7,   # right_hip_roll
+            5: 13,  # waist_roll
+            6: 2,   # left_hip_yaw
+            7: 8,   # right_hip_yaw
+            8: 14,  # waist_pitch
+            9: 3,   # left_knee
+            10: 9,  # right_knee
+            11: 15, # left_shoulder_pitch
+            12: 22, # right_shoulder_pitch
+            13: 4,  # left_ankle_pitch
+            14: 10, # right_ankle_pitch
+            15: 16, # left_shoulder_roll
+            16: 23, # right_shoulder_roll
+            17: 5,  # left_ankle_roll
+            18: 11, # right_ankle_roll
+            19: 17, # left_shoulder_yaw
+            20: 24, # right_shoulder_yaw
+            21: 18, # left_elbow
+            22: 25, # right_elbow
+            23: 19, # left_wrist_roll
+            24: 26, # right_wrist_roll
+            25: 20, # left_wrist_pitch
+            26: 27, # right_wrist_pitch
+            27: 21, # left_wrist_yaw
+            28: 28, # right_wrist_yaw
+        }
+        self.isaac_joints = {
+            0: "left_hip_pitch_joint",
+            1: "right_hip_pitch_joint",
+            2: "waist_yaw_joint",
+            3: "left_hip_roll_joint",
+            4: "right_hip_roll_joint",
+            5: "waist_roll_joint",
+            6: "left_hip_yaw_joint",
+            7: "right_hip_yaw_joint",
+            8: "waist_pitch_joint",
+            9: "left_knee_joint",
+            10: "right_knee_joint",
+            11: "left_shoulder_pitch_joint",
+            12: "right_shoulder_pitch_joint",
+            13: "left_ankle_pitch_joint",
+            14: "right_ankle_pitch_joint",
+            15: "left_shoulder_roll_joint",
+            16: "right_shoulder_roll_joint",
+            17: "left_ankle_roll_joint",
+            18: "right_ankle_roll_joint",
+            19: "left_shoulder_yaw_joint",
+            20: "right_shoulder_yaw_joint",
+            21: "left_elbow_joint",
+            22: "right_elbow_joint",
+            23: "left_wrist_roll_joint",
+            24: "right_wrist_roll_joint",
+            25: "left_wrist_pitch_joint",
+            26: "right_wrist_pitch_joint",
+            27: "left_wrist_yaw_joint",
+            28: "right_wrist_yaw_joint",
+        }
+        self.joint_names_mujoco = [
+            "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
+            "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+            "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
+            "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+            "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+            "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+            "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+            "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+            "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+        ]
+        self.full_joint_names = [
+            "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
+            "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+            "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
+            "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+            "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+            "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+            "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+            "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+            "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+        ]
+
+        self.num_motors = 29
+
+        # Logging information
+        self.declare_parameter("log", False)
+        self.declare_parameter("log_decimation", 1)
+        self.log = self.get_parameter("log").get_parameter_value().bool_value
+        self.log_decimation = self.get_parameter("log_decimation").get_parameter_value().integer_value
+        self.ctrl_count = 0
+
+        self.start_time = self.get_clock().now().nanoseconds / 1e9
+
+        if self.log:
+            self.get_logger().info(f"Logging enabled. Decimation: {self.log_decimation}.")
+
+            # Create log directory relative to $ROBOT_RL_ROOT
+            root = os.environ.get("ROBOT_RL_ROOT", "")
+
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            log_dir = os.path.join(root, "ctrl_logs", timestamp)
+            os.makedirs(log_dir, exist_ok=True)
+
+            self.log_file = os.path.join(log_dir, "g1_control.csv")
+            self.file = open(self.log_file, "w", buffering=8192)
+            self.writer = csv.writer(self.file)
+            self._lines_written = 0
+            self._file_index = 0
+
+            # Copy the config into the log directory
+            self.declare_parameter("config_name", "")
+            config_name = self.get_parameter("config_name").get_parameter_value().string_value
+            if config_name != "":
+                self.get_logger().info(f"Copying the config to the log directory ({config_name})...")
+                config_path = os.path.join(root, "g1_control", "configs", config_name)
+                shutil.copy2(config_path, log_dir)
+
+
+            # Copy the policy into the log directory
+            # self.get_logger().info("Copying the policy to the log directory...")
+            # shutil.copy2(self.policy_wrapper.get_policy_path(), log_dir)
+
+            # Copy the policy_parameters.yaml files to the log directory
+            for policy, behavior_name in zip(self.behavior_manager.policies, self.behavior_manager.behavior_names):
+                policy_params_path = policy.get_policy_params_path()
+                if os.path.exists(policy_params_path):
+                    dest_name = f"policy_parameters_{behavior_name}.yaml"
+                    shutil.copy2(policy_params_path, os.path.join(log_dir, dest_name))
+                    self.get_logger().info(f"Copied policy parameters for {behavior_name} to log directory.")
+
+            # Make a file with the log ordering (explicit column names for plotting)
+            # Note: pos/vel come from estimator (27 joints), action from policy (21 joints)
+            header_path = os.path.join(log_dir, "fields.csv")
+            with open(header_path, "w") as f:
+                columns = ["time"]
+                columns += ["quat_x", "quat_y", "quat_z", "quat_w"]
+                columns += ["ang_vel_x", "ang_vel_y", "ang_vel_z"]
+                columns += ["cmd_vx", "cmd_vy", "cmd_wz"]
+                columns += [f"pos_{name}" for name in self.full_joint_names]
+                columns += [f"vel_{name}" for name in self.full_joint_names]
+                columns += [f"act_{name}" for name in self.joint_names_mujoco]
+                f.write(",".join(columns) + "\n")
+
+        # # Set scales and defaults
+        # self.declare_parameter("action_scale", 0.25)
+        # self.action_scale = self.get_parameter("action_scale").get_parameter_value().double_value
+
+        # self.declare_parameter("cmd_scale", [2.0, 2.0, 0.25])
+        # self.cmd_scale = self.get_parameter("cmd_scale").get_parameter_value().double_array_value
+
+        # self.declare_parameter("period", 0.8)
+        # self.period = self.get_parameter("period").get_parameter_value().double_value
+
+        # self.declare_parameter("num_actions", 0)
+        # self.num_actions = self.get_parameter("num_actions").get_parameter_value().integer_value
+
+        # self.declare_parameter("default_angles", [0.0])
+        # self.declare_parameter("default_angles_names", [""])
+        # self.default_angles = self.get_parameter("default_angles").get_parameter_value().double_array_value
+        # self.default_angles_names = self.get_parameter("default_angles_names").get_parameter_value().string_array_value
+
+        # self.default_angles_isaac = self._convert_to_isaac(self.default_angles, self.default_angles_names)
+
+        # self.declare_parameter("qvel_scale", 1.0)
+        # self.qvel_scale = self.get_parameter("qvel_scale").get_parameter_value().double_value
+
+        # self.declare_parameter("ang_vel_scale", 1.0)
+        # self.ang_vel_scale = self.get_parameter("ang_vel_scale").get_parameter_value().double_value
+
+        # # Set PD gains
+        # self.declare_parameter("kps", [25.0] * self.num_motors)
+        # self.declare_parameter("kds", [0.5] * self.num_motors)
+        # self.kps = self.get_parameter("kps").get_parameter_value().double_array_value
+        # self.kds = self.get_parameter("kds").get_parameter_value().double_array_value
+
+        active_policy = self.behavior_manager.get_active_policy()
+        self.kps, self.kds = self._add_wrist_kp_kd_mujoco(active_policy.get_kp(self.joint_names_mujoco).tolist(),
+                                                            active_policy.get_kd(self.joint_names_mujoco).tolist())
+
+
+        # Time logging info
+        N_log = 100
+        self.print_time_decimation = 100
+        self.loop_rate_time = self.get_clock().now().nanoseconds / 1e9
+        self.timing_dict = {"update_x_hat": deque(maxlen=N_log), 
+                            "create_obs": deque(maxlen=N_log),
+                            "get_action": deque(maxlen=N_log),
+                            "compute_control": deque(maxlen=N_log),
+                            "loop_period": deque(maxlen=N_log),}
+
+        # Declare subscriber to velocity commands
+        self.register_obk_subscription(
+            "sub_vel_cmd_setting",
+            self.vel_cmd_callback,  # type: ignore
+            key="sub_vel_cmd_key",  # key can be specified here or in the config file
+            msg_type=VelocityCommand,
+        )
+
+        # Need the joystick for the E-stop
+        self.register_obk_subscription(
+            "sub_joy_setting",
+            self.joy_callback,  # type: ignore
+            key="sub_joy_key",  # key can be specified here or in the config file
+            msg_type=Joy,
+        )
+
+        self.received_xhat = False
+
+
+    def on_configure(self, state: LifecycleState) -> TransitionCallbackReturn:
+        """Configure the controller."""
+        super().on_configure(state)
+
+        self.cmd_vel = np.zeros((3,))
+        # self.proj_g = np.zeros((3,))
+        # self.proj_g[2] = -1
+        # self.omega = np.zeros((3,))
+        # self.phase = np.zeros((2,))
+        self.zero_action = np.zeros((self.num_motors,))
+        self.action = np.zeros((self.num_motors,))
+        self.t_start = None
+
+        self.get_logger().info("RL Velocity Tracking node configuration complete.")
+
+        return TransitionCallbackReturn.SUCCESS
+
+    def update_x_hat(self, x_hat_msg: EstimatedState) -> None:
+        """Update the state estimate.
+
+        Parameters:
+            x_hat_msg: The Obelisk message containing the state estimate.
+        """
+        start_time = self.get_clock().now().nanoseconds / 1e9
+
+        self.joint_pos = np.array(x_hat_msg.q_joints)
+        self.joint_names = x_hat_msg.joint_names
+
+        self.joint_vel = np.array(x_hat_msg.v_joints)
+
+        # self.proj_g = self.project_gravity(x_hat_msg.q_base[3:7])
+        self.qfb = np.array(x_hat_msg.q_base[:7])
+        self.vfb_ang = np.array(x_hat_msg.v_base[3:6])
+
+        # self.omega = np.array(x_hat_msg.v_base[3:6])
+
+        self.time = x_hat_msg.header.stamp.sec + x_hat_msg.header.stamp.nanosec * 1e-9
+
+        self.received_xhat = True
+
+        end_time = self.get_clock().now().nanoseconds / 1e9
+
+        self.log_time("update_x_hat", end_time - start_time)
+
+
+    def vel_cmd_callback(self, cmd_msg: VelocityCommand):
+        """Callback for velocity command messages."""
+        self.cmd_vel[0] = cmd_msg.v_x
+        self.cmd_vel[1] = cmd_msg.v_y
+        self.cmd_vel[2] = cmd_msg.w_z
+    
+    def compute_control(self) -> PDFeedForward:
+        """Compute the control signal for the dummy 2-link robot.
+
+        Returns:
+            obelisk_control_msg: The control message.
+        """
+        # Generate input to RL model
+        start_time = self.get_clock().now().nanoseconds / 1e9
+        if self.received_xhat:
+            if self.activate_policy:
+                # self.get_logger().info(f"Time: {(self.time - self.start_time):.4f}")
+                start_obs_time = self.get_clock().now().nanoseconds / 1e9
+                obs = self.behavior_manager.create_obs(
+                    self.qfb,
+                    self.vfb_ang,
+                    self.joint_pos,
+                    self.joint_vel,
+                    self.time - self.start_time,
+                    self.cmd_vel,
+                    self.joint_names,
+                )
+
+                # Check if we should execute a pending behavior switch (phi-gated)
+                old_phi = self.behavior_manager.get_active_policy().get_phi()
+                switched = self.behavior_manager.try_execute_pending_switch(self.time - self.start_time)
+                if switched:
+                    new_behavior = self.behavior_manager.get_active_behavior()
+                    if new_behavior != self.active_behavior:
+                        self.active_behavior = new_behavior
+                        self.get_logger().info(f"[Controller] Switched to {self.active_behavior} at phi = {old_phi}!")
+                        active_policy = self.behavior_manager.get_active_policy()
+                        self.kps, self.kds = self._add_wrist_kp_kd_mujoco(
+                            active_policy.get_kp(self.joint_names_mujoco).tolist(),
+                            active_policy.get_kd(self.joint_names_mujoco).tolist()
+                        )
+
+                end_obs_time = self.get_clock().now().nanoseconds / 1e9
+
+                # Call RL model
+                start_action_time = self.get_clock().now().nanoseconds / 1e9
+                self.action = self.behavior_manager.get_action(obs, self.joint_names_mujoco)
+                end_action_time = self.get_clock().now().nanoseconds / 1e9
+
+            start_compute_time = self.get_clock().now().nanoseconds / 1e9
+            # setting the message
+            pd_ff_msg = PDFeedForward()
+            pd_ff_msg.header.stamp = self.get_clock().now().to_msg()
+            pos_targ = self.action #self._convert_to_mujoco(self.action)lo
+            pd_ff_msg.pos_target = self._add_wrist_mujoco(pos_targ.tolist())
+            pd_ff_msg.vel_target = self._add_wrist_mujoco(self.zero_action.tolist())
+            pd_ff_msg.feed_forward = self._add_wrist_mujoco(self.zero_action.tolist())
+
+            # Add in the wrist joints
+
+            pd_ff_msg.u_mujoco = np.concatenate([
+                self._add_wrist_mujoco(pos_targ.tolist()),
+                self._add_wrist_mujoco(self.zero_action.tolist()),
+                self._add_wrist_mujoco(self.zero_action.tolist()),
+            ]).tolist()
+            pd_ff_msg.joint_names = self.full_joint_names
+
+            pd_ff_msg.kp = self.kps
+            pd_ff_msg.kd = self.kds
+
+            self.obk_publishers["pub_ctrl"].publish(pd_ff_msg)
+
+            # Log data
+            if self.log and self.ctrl_count % self.log_decimation == 0:
+                self.log_data({
+                    "time": self.time - self.start_time,
+                    "quaternion": self.qfb[3:7].tolist(),
+                    "angular_velocity": self.vfb_ang.tolist(),
+                    "commanded_velocity": self.cmd_vel.tolist(),
+                    "joint_positions": self.joint_pos.tolist(),
+                    "joint_velocities": self.joint_vel.tolist(),
+                    "action": self.action.tolist(),
+                })
+
+
+            t = self.get_clock().now().nanoseconds / 1e9
+            self.log_time("loop_period", t - self.loop_rate_time)
+            # self.get_logger().info(f"loop time: {t - self.loop_rate_time} s.")
+            self.loop_rate_time = self.get_clock().now().nanoseconds / 1e9
+
+            end_time = self.get_clock().now().nanoseconds / 1e9
+
+            end_compute_time = self.get_clock().now().nanoseconds / 1e9
+            self.log_time("compute_control", end_compute_time - start_compute_time)
+            if self.activate_policy:
+                self.log_time("create_obs", end_obs_time - start_obs_time)
+                self.log_time("get_action", end_action_time - start_action_time)
+
+            # self.get_logger().info(f"total compute: {end_time - start_time} s.")
+
+            # if self.ctrl_count & self.print_time_decimation == 0:
+            #     avg_times = self.get_average_times()
+            #     self.get_logger().info(
+            #         f"[Timing] update_x_hat: {avg_times['update_x_hat']:.4f} s, "
+            #         f"create_obs: {avg_times['create_obs']:.4f} s, "
+            #         f"get_action: {avg_times['get_action']:.4f} s, "
+            #         f"compute_control: {avg_times['compute_control']:.4f} s, "
+            #         f"loop period: {avg_times['loop_period']:.4f}s, "
+            #         f"total: {(avg_times['update_x_hat'] + avg_times['create_obs'] + avg_times['get_action'] + avg_times['compute_control']):.4f} s"
+            #     )
+
+
+            self.ctrl_count += 1
+
+            assert is_in_bound(type(pd_ff_msg), ObeliskControlMsg)
+            return pd_ff_msg
+    
+    # def _convert_to_mujoco(self, vec):
+    #     mj_vec = np.zeros(21)
+    #     for isaac_index, mujoco_index in self.isaac_to_mujoco.items():
+    #         mj_vec[mujoco_index] = vec[isaac_index]
+
+    #     return mj_vec
+
+    # def _convert_to_isaac(self, joint_values, joint_names):
+    #     ordered_values = np.zeros(len(self.isaac_joints), dtype=np.float64)
+    #     name_to_index = {name: idx for idx, name in self.isaac_joints.items()}
+
+    #     for name, value in zip(joint_names, joint_values):
+    #         if name in name_to_index:
+    #             index = name_to_index[name]
+    #             ordered_values[index] = value
+    #         else:
+    #             self.get_logger().warning(f"Unknown joint name: {name}", once=True)
+    #             # raise ValueError(f"Unknown joint name: {name}")
+
+    #     return ordered_values
+
+    def _add_wrist_mujoco(self, joint_values):
+        """29-dof policy already outputs wrist values. No-op."""
+        return joint_values
+
+    def _add_wrist_kp_kd_mujoco(self, kp, kd):
+        """29-dof policy already includes wrist kp/kd. No-op."""
+        return kp, kd
+
+    def log_data(self, data: dict):
+        """Log data to CSV file.
+
+        Args:
+            data: Dictionary containing the following keys:
+                - time: Current time
+                - quaternion: Base quaternion (4 values)
+                - angular_velocity: Base angular velocity (3 values)
+                - commanded_velocity: Commanded velocity (3 values)
+                - joint_positions: Joint positions (21 values)
+                - joint_velocities: Joint velocities (21 values)
+                - action: Policy action output (21 values)
+        """
+        row = [
+            data["time"],
+            *data["quaternion"],
+            *data["angular_velocity"],
+            *data["commanded_velocity"],
+            *data["joint_positions"],
+            *data["joint_velocities"],
+            *data["action"],
+        ]
+        self.writer.writerow(row)
+    
+    def log_time(self, key: str, time: float):
+        """Log timing information."""
+        if key in self.timing_dict:
+            self.timing_dict[key].append(time)
+        else:
+            raise ValueError(f"Key {key} not in timing dictionary.")
+
+    def get_average_times(self) -> dict:
+        return {key: sum(times) / len(times) if times else 0 for key, times in self.timing_dict.items()}
+
+    def joy_callback(self, joy_msg: Joy):
+        """Callback to watch for E-stop from joystick."""
+        RIGHT_TRIGGER = 5
+        if joy_msg.axes[RIGHT_TRIGGER] <= 0.1:
+            raise RuntimeError("[Controller] Joystick emergency stop triggered!!")
+
+        time = self.get_clock().now().nanoseconds / 1e9 - self.start_time
+        self.behavior_manager.check_behavior_switch(joy_msg, self.cmd_vel, time)
+
+        A = 0
+        if joy_msg.buttons[A] >= 0.9 and not self.activate_policy:
+            self.activate_policy = True
+            self.get_logger().warn("Policy activated!")
+
+def main(args: list | None = None) -> None:
+    """Main entrypoint."""
+    spin_obelisk(args, VelocityTrackingController, SingleThreadedExecutor)
+
+
+if __name__ == "__main__":
+    main()

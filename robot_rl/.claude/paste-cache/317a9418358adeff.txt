@@ -1,0 +1,41 @@
+(env_isaaclab) ubuntu@ubun:~/robot_rl$ PYTHONPATH=/home/ubuntu/robot_rl/transfer:$PYTHONPATH python transfer/sim/g1_runner.py --env_type=running_clf_sym --scene 29dof_basic_scene
+/home/ubuntu/anaconda3/envs/env_isaaclab/lib/python3.11/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_stream, resource_exists
+pygame 2.6.1 (SDL 2.28.4, Python 3.11.14)
+Hello from the pygame community. https://www.pygame.org/contribute.html
+[INFO] Looking for policies in: /home/ubuntu/robot_rl/logs/g1_policies/running-clf-symmetric/running_clf_sym
+[INFO] No run specified, finding latest run...
+[INFO] Using run: 2026-07-08_22-00-39
+[INFO] Loading policy from: /home/ubuntu/robot_rl/logs/g1_policies/running-clf-symmetric/running_clf_sym/2026-07-08_22-00-39/exported/policy.pt
+[INFO] Loading parameters from: /home/ubuntu/robot_rl/logs/g1_policies/running-clf-symmetric/running_clf_sym/2026-07-08_22-00-39/exported/policy_parameters.yaml
+Attempting to load /home/ubuntu/robot_rl/logs/g1_policies/running-clf-symmetric/running_clf_sym/2026-07-08_22-00-39/exported/policy.pt
+Trying to load the xml at /home/ubuntu/robot_rl/robots/g1/g1_21j_29dof_basic_scene.xml
+Mujoco joint names: ['left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint', 'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint', 'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint', 'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint', 'waist_yaw_joint', 'waist_roll_joint', 'waist_pitch_joint', 'left_shoulder_pitch_joint', 'left_shoulder_roll_joint', 'left_shoulder_yaw_joint', 'left_elbow_joint', 'left_wrist_roll_joint', 'left_wrist_pitch_joint', 'left_wrist_yaw_joint', 'right_shoulder_pitch_joint', 'right_shoulder_roll_joint', 'right_shoulder_yaw_joint', 'right_elbow_joint', 'right_wrist_roll_joint', 'right_wrist_pitch_joint', 'right_wrist_yaw_joint']
+Using controller: Xbox Series X Controller
+Starting mujoco simulation with robot g1_21j.
+Policy dt set to 0.02 s (10 steps per policy update.)
+Simulation dt set to 0.002 s. Sim loop rate set to 0.02 s.
+Height sensor enabled: False
+
+Set gains for 'left_hip_pitch_joint': kp=40.17923847137318, kd=2.5578897650279457
+Set gains for 'right_hip_pitch_joint': kp=40.17923847137318, kd=2.5578897650279457
+Set gains for 'waist_yaw_joint': kp=40.17923847137318, kd=2.5578897650279457
+Set gains for 'left_hip_roll_joint': kp=99.09842777666113, kd=6.3088018534966395
+Set gains for 'right_hip_roll_joint': kp=99.09842777666113, kd=6.3088018534966395
+Set gains for 'left_shoulder_pitch_joint': kp=14.25062309787429, kd=0.907222843292423
+Set gains for 'right_shoulder_pitch_joint': kp=14.25062309787429, kd=0.907222843292423
+Set gains for 'left_hip_yaw_joint': kp=40.17923847137318, kd=2.5578897650279457
+Set gains for 'right_hip_yaw_joint': kp=40.17923847137318, kd=2.5578897650279457
+Set gains for 'left_shoulder_roll_joint': kp=14.25062309787429, kd=0.907222843292423
+Set gains for 'right_shoulder_roll_joint': kp=14.25062309787429, kd=0.907222843292423
+Set gains for 'left_knee_joint': kp=99.09842777666113, kd=6.3088018534966395
+Set gains for 'right_knee_joint': kp=99.09842777666113, kd=6.3088018534966395
+Set gains for 'left_shoulder_yaw_joint': kp=14.25062309787429, kd=0.907222843292423
+Set gains for 'right_shoulder_yaw_joint': kp=14.25062309787429, kd=0.907222843292423
+Set gains for 'left_ankle_pitch_joint': kp=28.50124619574858, kd=1.814445686584846
+Set gains for 'right_ankle_pitch_joint': kp=28.50124619574858, kd=1.814445686584846
+Set gains for 'left_elbow_joint': kp=14.25062309787429, kd=0.907222843292423
+Set gains for 'right_elbow_joint': kp=14.25062309787429, kd=0.907222843292423
+Set gains for 'left_ankle_roll_joint': kp=28.50124619574858, kd=1.814445686584846
+Set gains for 'right_ankle_roll_joint': kp=28.50124619574858, kd=1.814445686584846
+Camera tracking body: torso_link

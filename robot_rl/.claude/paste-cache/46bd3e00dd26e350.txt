@@ -1,0 +1,5 @@
+❯   pip install -e source/robot_rl/                                                                                                                                                                                                                                                
+    rm -rf logs/g1_policies/running-clf-29dof/                                                                                                                                                                                                                                     
+    python scripts/rsl_rl/train_policy.py --env_type=running_clf_29dof --headless --num_envs=4096                                                                                                                                                                                  
+                                                                                                                                                                                                                                                                                   
+

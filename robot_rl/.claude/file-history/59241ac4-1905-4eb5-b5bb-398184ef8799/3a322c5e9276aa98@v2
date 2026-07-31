@@ -1,0 +1,46 @@
+"""Load ONNX policy and provide inference."""
+import numpy as np
+import yaml
+import onnxruntime as ort
+
+class Policy:
+    def __init__(self, onnx_path: str, params_path: str):
+        # Load ONNX
+        self.session = ort.InferenceSession(onnx_path)
+        self.input_name = self.session.get_inputs()[0].name
+        self.output_name = self.session.get_outputs()[0].name
+
+        # Load params
+        with open(params_path) as f:
+            self.params = yaml.safe_load(f)
+
+        self.num_actions = self.params["num_actions"]
+        self.default_joint_angles = np.array(self.params["default_joint_angles"])
+        self.joint_names_isaac = self.params["joint_names_isaac"]
+
+        # Build action scale array
+        self.action_scale = np.ones(self.num_actions)
+        for pattern, scale in self.params.get("action_scale", {}).items():
+            import re
+            for i, name in enumerate(self.joint_names_isaac):
+                if re.match(pattern.replace(".*", ".*").replace("(", "\\(").replace(")", "\\)"), name) or \
+                   re.match(pattern, name):
+                    self.action_scale[i] = scale
+
+        self.action_scale = self.action_scale.astype(np.float32)
+
+        print(f"[Policy] Loaded ONNX: {self.num_actions} actions")
+        print(f"[Policy] Joints: {len(self.joint_names_isaac)}")
+        print(f"[Policy] Default angles mean: {self.default_joint_angles.mean():.2f}")
+        print(f"[Policy] Action scale mean: {self.action_scale.mean():.4f}")
+
+    def __call__(self, obs: np.ndarray) -> np.ndarray:
+        """obs: [98] -> action: [29]"""
+        obs_batch = obs.reshape(1, -1).astype(np.float32)
+        action = self.session.run([self.output_name], {self.input_name: obs_batch})[0]
+        return action.flatten()
+
+    def get_action_target(self, obs: np.ndarray) -> np.ndarray:
+        """Get joint position targets."""
+        raw_action = self(obs)
+        return self.default_joint_angles + self.action_scale * raw_action

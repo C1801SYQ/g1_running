@@ -1,0 +1,105 @@
+已思考 21s
+
+下一步是：把你自己训练好的 model_7998.pt 导出成 policy.onnx，替换默认 policy，再重新跑 MuJoCo sim2sim。
+
+你现在已经跑通的是默认链路：g1_ctrl 已经编译出来，配置里当前默认读取 config/policy/velocity，而部署程序实际读取的是 policy_dir/params/deploy.yaml 和 policy_dir/exported/policy.onnx，不是直接读取 .pt。
+
+1. 先停止当前仿真
+
+两个终端都可以 Ctrl+C，或者执行：
+
+pkill -f unitree_mujoco
+pkill -f g1_ctrl
+2. 找到你最新训练模型
+cd ~/unitree_rl_lab
+
+find logs/rsl_rl/unitree_g1_29dof_velocity -name "model_*.pt" | sort -V | tail -20
+
+如果你确定要用 model_7998.pt：
+
+CKPT=$(find logs/rsl_rl/unitree_g1_29dof_velocity -name "model_7998.pt" | sort -V | tail -1)
+echo "$CKPT"
+ls -lh "$CKPT"
+
+如果能显示文件大小，说明找到了。
+
+3. 用 play.py 导出 ONNX
+
+执行：
+
+conda activate env_isaaclab
+cd ~/unitree_rl_lab
+
+python scripts/rsl_rl/play.py \
+  --task Unitree-G1-29dof-Velocity \
+  --num_envs 1 \
+  --checkpoint "$CKPT" \
+  --headless
+
+它启动后如果一直运行，可以等 30 秒左右再 Ctrl+C。然后查导出的 ONNX：
+
+RUN_DIR=$(dirname "$CKPT")
+find "$RUN_DIR" -path "*/exported/policy.onnx" -print
+
+如果输出类似：
+
+/home/ubuntu/unitree_rl_lab/logs/rsl_rl/unitree_g1_29dof_velocity/xxxx/exported/policy.onnx
+
+说明导出成功。
+
+4. 建立自己的部署 policy 目录
+cd ~/unitree_rl_lab/deploy/robots/g1_29dof
+
+mkdir -p config/policy/velocity/my_g1/exported
+mkdir -p config/policy/velocity/my_g1/params
+
+复制导出的 ONNX：
+
+EXPORTED_ONNX=$(find "$RUN_DIR" -path "*/exported/policy.onnx" | tail -1)
+
+cp "$EXPORTED_ONNX" \
+  ~/unitree_rl_lab/deploy/robots/g1_29dof/config/policy/velocity/my_g1/exported/policy.onnx
+
+复制默认部署参数：
+
+cp ~/unitree_rl_lab/deploy/robots/g1_29dof/config/policy/velocity/v0/params/deploy.yaml \
+   ~/unitree_rl_lab/deploy/robots/g1_29dof/config/policy/velocity/my_g1/params/deploy.yaml
+5. 修改 config.yaml 指向自己的 policy
+cd ~/unitree_rl_lab/deploy/robots/g1_29dof
+
+cp config/config.yaml config/config.yaml.bak_default_policy
+
+sed -i 's#policy_dir: config/policy/velocity#policy_dir: config/policy/velocity/my_g1#g' config/config.yaml
+
+grep -n "policy_dir" config/config.yaml
+
+你应该看到：
+
+policy_dir: config/policy/velocity/my_g1
+6. 重新跑 MuJoCo + g1_ctrl
+
+终端 1：
+
+cd ~/unitree_mujoco/simulate/build
+
+export LD_LIBRARY_PATH=/opt/unitree_robotics/lib:$LD_LIBRARY_PATH
+
+./unitree_mujoco -i 0 -n wlp3s0 -r g1 -s scene_29dof.xml
+
+终端 2：
+
+cd ~/unitree_rl_lab/deploy/robots/g1_29dof/build
+
+export LD_LIBRARY_PATH=/opt/unitree_robotics/lib:/home/ubuntu/unitree_rl_lab/deploy/thirdparty/onnxruntime-linux-x64-1.22.0/lib:$LD_LIBRARY_PATH
+
+./g1_ctrl --network wlp3s0
+
+然后按原来的顺序：
+
+LT + 上：进入 FixStand
+MuJoCo 窗口按 8：下放接地
+RB + X：启动自己的 Velocity policy
+稳定后按 9：关闭弹性带
+LT + B：紧急退回 Passive
+
+如果导出 ONNX 时 play.py 报错，把报错最后 50 行贴出来；如果导出成功但跑起来乱动，下一步就要检查 deploy.yaml 的观测项和训练时的观测项是否完全一致。

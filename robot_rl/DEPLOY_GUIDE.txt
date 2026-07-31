@@ -1,0 +1,201 @@
+================================================================================
+            G1 29-DOF 跑步策略实体部署指南
+================================================================================
+
+策略: speed_symfix (速度优先 + 对称修复)
+最高实测速度: 4.08 m/s (MuJoCo)
+训练迭代数: 9999
+-------------------------------------------------------------------------------
+
+## 一、前置准备（在训练机器上完成，已做完）
+
+本机修改过的文件：
+
+  文件                                          状态
+  ─────────────────────────────────────────────────────────
+  policy.pt                                      已导出 ✅
+  policy_parameters.yaml                         已导出 ✅
+  hardware_config_running_29dof.yaml             已生成 ✅
+  controller.py                                  已修改为29dof ✅
+  symmetry_functions.py                          已修复29dof ✅
+  g1_running_clf_29dof_env_cfg.py                速度优先权重 ✅
+
+该机器上的源文件路径：
+
+  export POLICY_DIR=logs/g1_policies/running-clf-29dof/running_clf_29dof/2026-07-27_15-27-01_speed_symfix/exported
+  export CONFIG_DIR=transfer/obelisk/g1_control/configs
+  export CODE_DIR=transfer/obelisk/g1_control/g1_control
+
+
+## 二、连线到 G1 实体机器人
+
+用网线将这台机器和 G1 连接。
+
+  # 设置本机 IP
+  sudo nmcli con mod "Wired connection 1" ipv4.addresses 192.168.123.222/24 ipv4.method manual
+  sudo nmcli con up "Wired connection 1"
+
+  # 确认能 ping 通 G1（G1 默认 IP 是 192.168.123.161）
+  ping 192.168.123.161
+
+
+## 三、拷贝文件到 G1
+
+在训练机器上执行以下命令（替换 YOUR_ROBOT_USER 为 G1 上你的用户名）：
+
+  export ROBOT_IP=192.168.123.161
+  export ROBOT_USER=YOUR_ROBOT_USER
+
+  # 1. 拷贝策略文件
+  scp logs/g1_policies/running-clf-29dof/running_clf_29dof/2026-07-27_15-27-01_speed_symfix/exported/policy.pt \
+       ${ROBOT_USER}@${ROBOT_IP}:~/robot_rl/transfer/obelisk/g1_control/resource/policies/
+
+  scp logs/g1_policies/running-clf-29dof/running_clf_29dof/2026-07-27_15-27-01_speed_symfix/exported/policy_parameters.yaml \
+       ${ROBOT_USER}@${ROBOT_IP}:~/robot_rl/transfer/obelisk/g1_control/resource/policies/
+
+  # 2. 拷贝硬件配置
+  scp transfer/obelisk/g1_control/configs/hardware_config_running_29dof.yaml \
+       ${ROBOT_USER}@${ROBOT_IP}:~/robot_rl/transfer/obelisk/g1_control/configs/
+
+  # 3. 拷贝修改后的控制器代码
+  scp transfer/obelisk/g1_control/g1_control/controller.py \
+       ${ROBOT_USER}@${ROBOT_IP}:~/robot_rl/transfer/obelisk/g1_control/g1_control/
+
+  # 4. 拷贝修改后的策略加载器（如果之前没改过，可以跳过）
+  scp transfer/obelisk/g1_control/g1_control/policy.py \
+       ${ROBOT_USER}@${ROBOT_IP}:~/robot_rl/transfer/obelisk/g1_control/g1_control/
+
+
+## 四、在 G1 上启动 Docker 和控制器
+
+SSH 到 G1：
+
+  ssh ${ROBOT_USER}@192.168.123.161
+
+### 4.1 进入项目目录
+
+  cd ~/robot_rl/transfer/obelisk
+
+### 4.2 确认文件到齐
+
+  ls g1_control/resource/policies/policy.pt
+  ls g1_control/resource/policies/policy_parameters.yaml
+  ls g1_control/configs/hardware_config_running_29dof.yaml
+
+### 4.3 创建 .env 文件（如果不存在）
+
+  echo "USER=\${USER:-\$(id -un)}" > docker/.env
+
+### 4.4 启动 Docker 容器
+
+  docker compose -f docker-compose-no-gpu.yml up -d
+
+  等容器启动后，查看容器 ID：
+  docker ps
+
+### 4.5 进入容器
+
+  docker exec -it <CONTAINER_ID_OR_NAME> /bin/bash
+
+### 4.6 构建 ROS 环境（容器内）
+
+  # 首次需要构建
+  obk
+  colcon build --symlink-install --parallel-workers $(nproc)
+  source install/setup.bash
+
+  # 以后只需 source
+  source scripts/build.sh
+
+### 4.7 确认网络接口名称
+
+回到 G1 物理机（容器外），运行 ifconfig 查看网络接口名称。
+更新 hardware_config_running_29dof.yaml 中的 interface 名称：
+
+  在 robot 段找到：
+    network_interface_name: enx6c1ff7207b57
+
+  改为你本机的实际接口名（从 ifconfig 看到的）。
+
+### 4.8 启动 29dof 跑步控制（容器内）
+
+  obk-launch config=$ROBOT_RL_ROOT/g1_control/configs/hardware_config_running_29dof.yaml device=onboard bag=false
+
+
+## 五、宇树遥控器操作流程
+
+### 5.1 状态机切换
+
+  步骤  操作                      效果
+  ──────────────────────────────────────────────
+  1     确认 RT（右扳机）按下       保持住（松开会急停）
+  2     按 LT（左扳机）            → damping 模式（电机释放）
+  3     按 L1 + DPAD ←            → user_pose（自动走到站立姿态）
+  4     按 L1 + DPAD ↓            → low_level_ctrl（策略接管！）
+
+### 5.2 跑步控制（low_level_ctrl 模式下）
+
+  操作                    效果
+  ──────────────────────────────────────────────
+  左摇杆 上/下             前进/后退（速度命令）
+  左摇杆 左/右             左右平移
+  右摇杆 左/右             左右转向
+  A 键                     激活策略输出
+  RB + Y                   提速
+  RB + A                   减速
+  Menu 键                  打印键位说明到终端
+  松开 RT（右扳机）        紧急停止
+
+### 5.3 正常跑步流程
+
+  ┌─ 全程压住 RT（右扳机）不松 ─┐
+  │                             │
+  │  1. LT → damping            │
+  │  2. L1+← → user_pose        │
+  │  （等机器人站稳）            │
+  │  3. L1+↓ → low_level_ctrl   │
+  │  4. 按 A → 激活策略          │
+  │  5. 左摇杆慢慢前推 → 跑步    │
+  │                             │
+  │  速度从低到高逐步测试：      │
+  │    - 先推 1/4 杆（约 1m/s）  │
+  │    - 确认关节动作正确        │
+  │    - 再加大到 3m/s           │
+  │    - 最终推到满速            │
+  └─────────────────────────────┘
+
+  ⚠️ 任何异常 → 立即松 RT 急停！
+
+
+## 六、首次运行安全检查
+
+  □ 机器人挂在测试架上或有两人以上保护
+  □ RT（右扳机）必须确认能急停
+  □ 速度从最低开始（1/4 杆位），逐步增加
+  □ 观察每个关节：方向是否正确、有无抖动
+  □ 确认左右腿交替、手臂摆动对称
+  □ 确认 waist_roll/pitch 不动（保持0）
+
+
+## 七、故障排查
+
+  现象                          可能原因                    处理
+  ─────────────────────────────────────────────────────────────────
+  机器人不动                     策略没激活                    按 A 键
+  obk-launch 报错找不到策略      文件路径不对                  确认 4.2 步
+  关节乱动/方向反               joint_names_mujoco 顺序不对    修改 controller.py
+  机器人发抖                     KP/KD 不匹配                  从 policy YAML 自动读取
+  跑步姿势异常                   策略文件版本不对              用错 policy.pt
+  Docker 启动失败               Docker 没装好                  参考 obelisk README
+
+
+## 八、训练机器上的模型文件速查
+
+  export POLICY_DIR=logs/g1_policies/running-clf-29dof/running_clf_29dof/2026-07-27_15-27-01_speed_symfix/exported
+
+  文件                    用途
+  ─────────────────────────────────────
+  policy.pt               JIT 推理模型（29→29 维）
+  policy_parameters.yaml  观测结构、动作缩放、KP/KD
+  policy.onnx             ONNX 格式（备用）
+================================================================================

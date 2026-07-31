@@ -1,0 +1,245 @@
+"""Sim2Sim: Run 29dof G1 policy in MuJoCo.
+
+Key features:
+- Loads IsaacLab-trained ONNX policy
+- Builds identical observation format
+- Applies actions through PD position control
+- Supports velocity command input
+- Monitors fall detection and metrics
+
+Usage:
+    python run_sim2sim.py                          # default 3.0 m/s
+    python run_sim2sim.py --vx 4.0                 # 4.0 m/s
+    python run_sim2sim.py --vx 1.0 --headless     # headless mode
+"""
+import argparse, os, sys, time
+import numpy as np
+import mujoco
+import mujoco.viewer
+
+# Add sim2sim dir to path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from policy_loader import Policy
+from observation import ObservationBuilder
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--vx", type=float, default=3.0, help="Forward velocity (m/s)")
+    p.add_argument("--vy", type=float, default=0.0, help="Lateral velocity (m/s)")
+    p.add_argument("--vyaw", type=float, default=0.0, help="Yaw rate (rad/s)")
+    p.add_argument("--headless", action="store_true", help="Headless mode")
+    p.add_argument("--duration", type=float, default=0, help="Max sim time (0=forever)")
+    return p.parse_args()
+
+
+def get_mujoco_joint_names(model):
+    """Extract joint names from MuJoCo model."""
+    names = []
+    for i in range(model.njnt):
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, i)
+        if name and name != "floating_base_joint":
+            names.append(name)
+    return names
+
+
+def main():
+    args = parse_args()
+
+    # Load ONNX policy
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    policy = Policy(
+        os.path.join(script_dir, "policy.onnx"),
+        os.path.join(script_dir, "policy_parameters.yaml"),
+    )
+
+    # Load MuJoCo model
+    xml_path = "/home/ubuntu/unitree_mujoco/unitree_robots/g1/scene_29dof.xml"
+    model = mujoco.MjModel.from_xml_path(xml_path)
+    data = mujoco.MjData(model)
+
+    # Simulation timing
+    model.opt.timestep = 0.002
+    control_dt = 0.02  # 50Hz
+    sim_steps_per_control = int(control_dt / model.opt.timestep)  # 10
+
+    # Get joint info
+    mj_joint_names = get_mujoco_joint_names(model)
+    print(f"[MuJoCo] {len(mj_joint_names)} joints, nu={model.nu}")
+    print(f"[MuJoCo] dt={model.opt.timestep}, control_dt={control_dt}")
+    print(f"[MuJoCo] {sim_steps_per_control} physics steps per control step")
+
+    # Build observation
+    obs_builder = ObservationBuilder(policy, mj_joint_names, list(range(model.nu)))
+
+    # Convert motor actuators to position servos (official model uses <motor>)
+    # We set PD gains via actuator parameters
+    for i in range(model.nu):
+        model.actuator_gainprm[i, 0] = 1.0  # Will be overridden by our PD
+
+    # Set standing initial pose (borrowed from our working g1_21j keyframe)
+    # joint order in MuJoCo: left_hip_pitch, left_hip_roll, left_hip_yaw, left_knee, left_ankle_pitch, left_ankle_roll,
+    #                          right_hip_pitch, right_hip_roll, right_hip_yaw, right_knee, right_ankle_pitch, right_ankle_roll,
+    #                          waist_yaw, waist_roll, waist_pitch,
+    #                          left_shoulder_pitch, left_shoulder_roll, left_shoulder_yaw, left_elbow, left_wrist_roll, left_wrist_pitch, left_wrist_yaw,
+    #                          right_shoulder_pitch, right_shoulder_roll, right_shoulder_yaw, right_elbow, right_wrist_roll, right_wrist_pitch, right_wrist_yaw
+    standing_qpos = np.array([
+        0, 0, 0.79,          # base pos
+        1, 0, 0, 0,           # base quat (w,x,y,z)
+        -0.25, 0, 0, 0.46, -0.25, 0,   # left leg
+        -0.25, 0, 0, 0.46, -0.25, 0,   # right leg
+        0, 0, 0,                        # waist
+        0.31, 0.24, 0, 0.8, 0, 0, 0,   # left arm (shoulder_pitch, roll, yaw, elbow, wrist_roll, pitch, yaw)
+        0.31, -0.24, 0, 0.8, 0, 0, 0,  # right arm
+    ])
+    data.qpos[:] = standing_qpos
+    mujoco.mj_forward(model, data)
+
+    # PD gains per joint group
+    kp = np.zeros(model.nu)
+    kd = np.zeros(model.nu)
+    for i, name in enumerate(mj_joint_names):
+        if 'hip' in name or 'knee' in name:
+            kp[i] = 40.0; kd[i] = 2.5
+        elif 'ankle' in name:
+            kp[i] = 28.0; kd[i] = 1.8
+        elif 'waist' in name:
+            kp[i] = 40.0; kd[i] = 2.5
+        elif 'shoulder' in name or 'elbow' in name:
+            kp[i] = 14.0; kd[i] = 0.9
+        elif 'wrist' in name:
+            kp[i] = 14.0; kd[i] = 0.9
+        else:
+            kp[i] = 20.0; kd[i] = 1.0
+
+    # Convert to numpy
+    kp = kp.astype(np.float32)
+    kd = kd.astype(np.float32)
+
+    print(f"[PD] Gains set for {model.nu} actuators")
+
+    # Metrics
+    start_time = time.time()
+    step_count = 0
+    fell = False
+    fall_time = 0.0
+
+    print(f"\n{'='*60}")
+    print(f"  Sim2Sim Running: vx={args.vx:.1f} m/s")
+    print(f"{'='*60}\n")
+
+    if args.headless:
+        _run_headless(args, model, data, policy, obs_builder, kp, kd,
+                      sim_steps_per_control, start_time)
+    else:
+        _run_viewer(args, model, data, policy, obs_builder, kp, kd,
+                    sim_steps_per_control, start_time)
+
+
+def _run_viewer(args, model, data, policy, obs_builder, kp, kd,
+                sim_steps_per_control, start_time):
+    """Run with MuJoCo viewer."""
+    step_count = 0
+    fell = False
+
+    with mujoco.viewer.launch_passive(model, data) as viewer:
+        # Track torso
+        torso_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
+        if torso_id >= 0:
+            viewer.cam.trackbodyid = torso_id
+            viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+            viewer.cam.distance = 3.0
+
+        while viewer.is_running():
+            if fell:
+                viewer.sync()
+                time.sleep(0.01)
+                continue
+
+            t = data.time
+            cmd_vel = [args.vx, args.vy, args.vyaw]
+
+            # Build observation
+            obs = obs_builder.build(data, cmd_vel, t)
+
+            # Get action from policy (position targets in IsaacLab frame)
+            action = policy(obs)
+            target_pos = policy.default_joint_angles + policy.action_scale * action
+
+            # Convert to MuJoCo joint order
+            mj_target = np.zeros(model.nu)
+            for mj_idx, isaac_idx in obs_builder.mj_to_isaac.items():
+                mj_target[mj_idx] = target_pos[isaac_idx]
+
+            # Apply PD control
+            joint_pos = data.qpos[7:7+model.nu]
+            joint_vel = data.qvel[6:6+model.nu]
+            data.ctrl[:] = mj_target * kp + (-kp * joint_pos + -kd * joint_vel) / 1.0
+
+            # Actually, for position actuators: ctrl = target position
+            # mujoco formula: force = kp*(ctrl - q) - kd*qd
+            # So set ctrl = target_pos, and actuator gains = [kp, -kp, -kd]
+            # The actuator gainprm/biasprm handle the kp/kd
+            # Just set ctrl to target position
+            data.ctrl[:] = mj_target
+
+            # Store last action for next observation
+            obs_builder.set_last_action(action)
+
+            # Physics steps
+            for _ in range(sim_steps_per_control):
+                mujoco.mj_step(model, data)
+
+            step_count += 1
+
+            # Fall detection
+            if data.qpos[2] < 0.2:
+                fell = True
+                fall_time = data.time
+                print(f"[FALL] Robot fell at t={fall_time:.1f}s, step={step_count}")
+
+            # Periodic status
+            if step_count % 250 == 0:
+                elapsed = time.time() - start_time
+                speed = data.qvel[0]
+                height = data.qpos[2]
+                print(f"  t={t:.0f}s | step={step_count} | speed={speed:.1f} m/s | height={height:.2f}m")
+
+            viewer.sync()
+
+
+def _run_headless(args, model, data, policy, obs_builder, kp, kd,
+                  sim_steps_per_control, start_time):
+    """Run headless for metrics."""
+    step_count = 0
+    fell = False
+    max_time = args.duration if args.duration > 0 else 30.0
+
+    while data.time < max_time and not fell:
+        t = data.time
+        cmd_vel = [args.vx, args.vy, args.vyaw]
+        obs = obs_builder.build(data, cmd_vel, t)
+        action = policy(obs)
+        target_pos = policy.default_joint_angles + policy.action_scale * action
+
+        mj_target = np.zeros(model.nu)
+        for mj_idx, isaac_idx in obs_builder.mj_to_isaac.items():
+            mj_target[mj_idx] = target_pos[isaac_idx]
+        data.ctrl[:] = mj_target
+        obs_builder.set_last_action(action)
+
+        for _ in range(sim_steps_per_control):
+            mujoco.mj_step(model, data)
+        step_count += 1
+
+        if data.qpos[2] < 0.2:
+            fell = True
+
+    elapsed = time.time() - start_time
+    speed = data.qvel[0]
+    print(f"\n[RESULT] t={data.time:.1f}s | steps={step_count} | "
+          f"speed={speed:.2f} m/s | fell={fell} | wall_time={elapsed:.1f}s")
+
+
+if __name__ == "__main__":
+    main()

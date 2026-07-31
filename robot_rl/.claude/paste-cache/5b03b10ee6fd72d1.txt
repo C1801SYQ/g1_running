@@ -1,0 +1,433 @@
+我现在有一个 Unitree G1 29DOF 机器人强化学习策略，需要完成 Isaac Gym/Isaac Sim -> MuJoCo 的 sim2sim 验证。
+
+请不要重新训练策略，只完成部署和仿真迁移流程。
+
+我的目标：
+1. 在 Isaac 环境训练得到 policy（pt 或 onnx）
+2. 导出 ONNX
+3. 在 MuJoCo 中加载同一个策略
+4. 使用相同 observation/action 定义运行
+5. 验证机器人运动是否一致
+6. 最终迁移到真机
+
+请按照以下流程实现。
+
+=============================
+一、确认训练策略格式
+=============================
+
+检查训练输出：
+
+logs/
+ └── rsl_rl/
+      └── xxx/
+          ├── model_xxxx.pt
+          └── exported/
+               └── policy.onnx
+
+
+如果只有 pt：
+
+使用 IsaacLab/rsl_rl 官方 export 方法：
+
+pt -> policy.onnx
+
+
+确认：
+
+输入 observation:
+shape = ?
+
+输出 action:
+shape = ?
+
+例如：
+
+obs:
+(base angular velocity,
+ projected gravity,
+ velocity command,
+ joint position,
+ joint velocity,
+ last action)
+
+action:
+29 DOF joint position target
+
+
+记录下来。
+
+=============================
+二、准备 MuJoCo 环境
+=============================
+
+安装：
+
+mujoco >= 3.1
+
+建议：
+
+~/mujoco/
+
+或者：
+
+/opt/unitree_robotics/
+
+
+安装 Unitree MuJoCo:
+
+git clone https://github.com/unitreerobotics/unitree_mujoco.git
+
+
+确认：
+
+unitree_robots/
+ └── g1/
+      ├── scene_29dof.xml
+      └── g1_29dof.xml
+
+
+能够运行：
+
+python simulate.py
+
+
+看到 G1 模型。
+
+
+=============================
+三、建立 MuJoCo Policy Wrapper
+=============================
+
+
+创建：
+
+sim2sim/
+
+
+结构：
+
+sim2sim
+├── run_policy.py
+├── policy.py
+├── robot.py
+├── config.yaml
+└── observation.py
+
+
+
+功能：
+
+
+policy.py:
+
+加载 ONNX:
+
+onnxruntime.InferenceSession(
+    "policy.onnx"
+)
+
+
+输入:
+
+obs
+
+输出:
+
+action
+
+
+
+=============================
+四、实现 Observation 对齐
+=============================
+
+
+必须严格按照训练环境。
+
+
+不要直接使用 MuJoCo state。
+
+
+需要转换：
+
+
+MuJoCo:
+
+qpos
+qvel
+imu
+
+
+转换:
+
+
+obs = [
+
+base_ang_vel,
+
+projected_gravity,
+
+command,
+
+joint_pos - default_joint_pos,
+
+joint_vel,
+
+last_action
+
+]
+
+
+
+注意：
+
+joint 顺序必须和训练一致。
+
+
+检查：
+
+joint_ids_map
+
+
+例如：
+
+[0,6,12,
+1,7,13,
+...]
+
+必须保持。
+
+
+=============================
+五、Action 转换
+=============================
+
+
+训练输出：
+
+action
+
+
+转换：
+
+target_joint_position =
+default_joint_position
++
+action_scale * action
+
+
+
+例如：
+
+
+scale=0.25
+
+
+q_target =
+q_default + 0.25*action
+
+
+
+然后发送：
+
+mj_data.ctrl
+
+
+
+=============================
+六、控制循环
+
+
+控制频率：
+
+训练：
+
+50Hz
+
+step_dt=0.02
+
+
+MuJoCo:
+
+while True:
+
+    obs = get_obs()
+
+    action = policy(obs)
+
+    apply_action(action)
+
+    mujoco.step()
+
+
+保持：
+
+dt一致。
+
+
+=============================
+七、加入速度command
+
+
+训练策略通常输入：
+
+lin_vel_x
+
+lin_vel_y
+
+ang_vel_z
+
+
+增加：
+
+command.yaml
+
+
+例如：
+
+command:
+
+ vx=0.5
+
+ vy=0
+
+ yaw=0
+
+
+
+测试：
+
+0速度:
+
+机器人应该站立
+
+
+0.5:
+
+机器人前进
+
+
+
+=============================
+八、Sim2Sim验证指标
+
+
+必须记录：
+
+
+1. 是否倒地
+
+2. base height
+
+3. base orientation
+
+4. joint tracking
+
+5. velocity tracking
+
+
+
+输出：
+
+episode time
+
+average velocity
+
+fall reason
+
+
+
+=============================
+九、如果MuJoCo漂移
+
+
+按照顺序检查：
+
+
+1.
+
+joint order
+
+
+2.
+
+default_joint_pos
+
+
+3.
+
+action scale
+
+
+4.
+
+observation normalization
+
+
+5.
+
+PD参数
+
+
+6.
+
+gravity direction
+
+
+7.
+
+imu坐标系
+
+
+
+不要修改policy。
+
+
+=============================
+十、最终部署
+
+
+MuJoCo验证成功后：
+
+ONNX
+
+↓
+
+deploy/g1_29dof
+
+
+替换：
+
+policy.onnx
+
+
+运行：
+
+g1_ctrl
+
+
+Xbox:
+
+LT + UP:
+
+FixStand
+
+
+RB + X:
+
+启动policy
+
+
+
+=============================
+
+请先扫描我的工程：
+
+1. 找到已有 Isaac policy
+2. 找到 ONNX export
+3. 找到 G1 MuJoCo 模型
+4. 自动生成 sim2sim 文件夹
+5. 完成最小可运行 demo
+
+不要修改训练代码。

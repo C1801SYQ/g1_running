@@ -1,0 +1,164 @@
+"""Sim2Sim G1 29dof with Xbox mode switching."""
+import numpy as np, os, sys, pathlib, time
+import mujoco
+import mujoco.viewer
+import pygame
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'transfer', 'sim'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'transfer'))
+from rl_policy import RLPolicy
+from robot import Robot
+
+# Load policy
+log = str(pathlib.Path(__file__).parent.parent /
+          'logs/g1_policies/running-clf-29dof/running_clf_29dof/2026-07-16_15-53-29')
+p = RLPolicy(f'{log}/exported/policy_parameters.yaml', f'{log}/exported/policy.pt')
+p.load()
+
+# Robot (without Simulation wrapper - we do custom loop)
+robot = Robot('g1_21j', '29dof_scene', np.array([1,1,1]), None, False,
+              {'kp_y': 3.0, 'kd_y': 0.5, 'kp_yaw': 1.5, 'kd_yaw': 0.5})
+robot.set_initial_condition(p)
+robot.set_pd_gains_from_policy(p)
+
+# Joystick
+pygame.init()
+pygame.joystick.init()
+js = pygame.joystick.Joystick(0) if pygame.joystick.get_count() > 0 else None
+if js:
+    js.init()
+    print(f"[Joystick] {js.get_name()}")
+else:
+    print("[Joystick] Not found - using keyboard fallback")
+
+# Elastic band (key 9 to toggle)
+class ElasticBand:
+    def __init__(self):
+        self.enable = False
+        self.stiffness = 200.0; self.damping = 100.0
+        self.point = np.array([0, 0, 5.0]); self.length = 0.0
+    def force(self, pos, vel):
+        if not self.enable: return np.zeros(3)
+        d = self.point - pos; dist = np.linalg.norm(d)
+        direction = d / max(dist, 1e-6)
+        return (self.stiffness*(dist-self.length) - self.damping*np.dot(vel, direction)) * direction
+
+band = ElasticBand()
+
+# State
+MODE_STANDBY = 0
+MODE_POLICY = 1
+mode = MODE_STANDBY
+vx_cmd = 3.0
+last_action = np.zeros(p.get_num_actions())
+stand_q = robot.mj_data.qpos[7:].copy()
+
+sim_dt = robot.mj_model.opt.timestep
+policy_dt = p.get_dt()
+steps_per_policy = int(policy_dt / sim_dt)
+print(f"[Timing] physics_dt={sim_dt}, policy_dt={policy_dt}, steps_per_policy={steps_per_policy}")
+
+# Keyboard callback for elastic band
+def key_cb(key):
+    glfw = mujoco.glfw.glfw
+    if key == glfw.KEY_9:
+        band.enable = not band.enable
+        print(f"[Band] {'ON' if band.enable else 'OFF'}")
+    elif key == glfw.KEY_7:
+        band.length = max(0, band.length - 0.1)
+        print(f"[Band] length={band.length:.1f}")
+    elif key == glfw.KEY_8:
+        band.length += 0.1
+        print(f"[Band] length={band.length:.1f}")
+
+# Viewer
+with mujoco.viewer.launch_passive(robot.mj_model, robot.mj_data, key_callback=key_cb) as viewer:
+    torso_id = mujoco.mj_name2id(robot.mj_model, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
+    if torso_id >= 0:
+        viewer.cam.trackbodyid = torso_id
+        viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+        viewer.cam.distance = 3.0
+
+    print(f"\n{'='*60}")
+    print(f"  Xbox Controls:")
+    print(f"    RB + X  → Start policy (running mode)")
+    print(f"    LT + B  → Emergency stop (standby)")
+    print(f"    Left Stick → Control speed (in policy mode)")
+    print(f"    Right Stick → Turn (in policy mode)")
+    print(f"  Current mode: STANDBY")
+    print(f"{'='*60}\n")
+
+    prev_mode = mode
+    step = 0
+
+    while viewer.is_running():
+        # Process joystick events
+        rb_pressed = False; x_pressed = False; lt_pressed = False; b_pressed = False
+        raw_vx = 0.0; raw_vyaw = 0.0
+
+        pygame.event.pump()
+        if js:
+            rb_pressed = js.get_button(5)   # RB
+            lt_pressed = js.get_axis(2) > 0.5  # LT (axis, not button)
+            x_pressed = js.get_button(2)    # X
+            b_pressed = js.get_button(1)    # B
+            raw_vx = -js.get_axis(1)         # Left stick Y
+            raw_vyaw = -js.get_axis(3)       # Right stick X
+
+        # Mode switching
+        if rb_pressed and x_pressed and mode == MODE_STANDBY:
+            mode = MODE_POLICY
+            print("[MODE] → RUNNING (policy active)")
+        if lt_pressed and b_pressed and mode == MODE_POLICY:
+            mode = MODE_STANDBY
+            stand_q = robot.mj_data.qpos[7:].copy()
+            print("[MODE] → STANDBY")
+
+        if mode != prev_mode:
+            prev_mode = mode
+
+        # Compute velocity command
+        vx = 3.0 + raw_vx * 2.0  # 1.0-5.0 range
+        vyaw = raw_vyaw * 0.75
+
+        if mode == MODE_POLICY:
+            # Build observation and get policy action
+            obs = robot.create_observation(p)
+            action = p.get_action(obs, robot.joint_names)
+            robot.apply_action(action)
+            last_action = action.copy()
+        else:
+            # Standby: PD hold standing position
+            q = robot.mj_data.qpos[7:]
+            dq = robot.mj_data.qvel[6:]
+            target = stand_q
+            # Simple PD
+            kp_stand = 40.0; kd_stand = 2.0
+            ctrl = target + (kp_stand * (target - q) - kd_stand * dq) * 0.0  # just set target
+            robot.mj_data.ctrl[:] = target
+            # Actually just set position target
+            for i in range(robot.mj_model.nu):
+                robot.mj_data.ctrl[i] = target[i]
+
+        # Physics steps with elastic band
+        torso_id = mujoco.mj_name2id(robot.mj_model, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
+        for _ in range(steps_per_policy):
+            if band.enable and torso_id >= 0:
+                pos = robot.mj_data.xpos[torso_id]
+                vel = robot.mj_data.cvel[torso_id][3:6]  # linear velocity
+                f = band.force(pos, vel)
+                robot.mj_data.xfrc_applied[torso_id, :3] = f
+            mujoco.mj_step(robot.mj_model, robot.mj_data)
+
+        # Key 9: toggle elastic band
+        if hasattr(viewer, 'opt'):
+            pass  # keyboard handled via key_callback
+
+        step += 1
+        if step % 125 == 0:  # ~2.5s
+            t = robot.mj_data.time
+            spd = robot.mj_data.qvel[0]
+            mode_str = "RUN" if mode == MODE_POLICY else "STBY"
+            print(f"  [{mode_str}] t={t:.0f}s speed={spd:.1f}m/s vx_cmd={vx:.1f}")
+
+        viewer.sync()

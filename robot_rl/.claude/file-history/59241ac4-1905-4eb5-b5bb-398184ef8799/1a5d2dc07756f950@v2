@@ -1,0 +1,47 @@
+"""Extrapolate running trajectories to higher speeds by time-scaling."""
+import yaml, os, copy, numpy as np
+
+base = '/home/ubuntu/robot_rl/hf/trajectories/running'
+out_dir = '/home/ubuntu/robot_rl/hf/trajectories/running'
+
+# Load the fastest existing config as template
+with open(os.path.join(base, 'running_tracking_config_solution_360.yaml')) as f:
+    t360 = yaml.safe_load(f)
+
+old_speed = 3.6  # conditioner midpoint
+old_T_flight = t360['flight_phase']['T'][0]
+old_T_stance = t360['single_support']['T'][0]
+old_total_half = old_T_flight + old_T_stance
+
+# Extrapolate for target speeds
+for target_speed in [4.0, 4.5, 5.0]:
+    scale = old_speed / target_speed  # time scale factor (<1 for faster)
+
+    new = copy.deepcopy(t360)
+    new['conditioner'] = [target_speed - 0.1, target_speed + 0.1]
+
+    # Scale time
+    new['flight_phase']['T'] = [old_T_flight * scale]
+    new['single_support']['T'] = [old_T_stance * scale]
+
+    # Scale joint velocity data proportionally (q stays same, time shrinks)
+    for phase in ['flight_phase', 'single_support']:
+        if 'q' in new[phase]:
+            for k in new[phase]['q']:
+                new[phase]['q'][k] = [float(x) for x in new[phase]['q'][k]]
+        if 'qd' in new[phase]:
+            for k in new[phase]['qd']:
+                new[phase]['qd'][k] = [float(x) / scale for x in new[phase]['qd'][k]]
+        if 'qdd' in new[phase]:
+            for k in new[phase]['qdd']:
+                new[phase]['qdd'][k] = [float(x) / (scale**2) for x in new[phase]['qdd'][k]]
+
+    speed_label = int(target_speed * 100)
+    fname = f'running_tracking_config_solution_{speed_label}.yaml'
+    out_path = os.path.join(out_dir, fname)
+
+    with open(out_path, 'w') as f:
+        yaml.dump(new, f, default_flow_style=None)
+
+    print(f'Generated: {fname} (conditioner={new["conditioner"]}, '
+          f'T_flight={new["flight_phase"]["T"][0]:.3f}, T_stance={new["single_support"]["T"][0]:.3f})')
