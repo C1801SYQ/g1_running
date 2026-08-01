@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.idea/
+.vscode/
+output/
+.venv/
+.env
+*.log
+*.pt
+*.onnx
+build/
+cmake_build/
+.DS_Store
+
+# Personal application material: keep locally, never publish.
+docs/PROJECT_INTRO.md

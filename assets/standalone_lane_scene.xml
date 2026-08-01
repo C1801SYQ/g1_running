@@ -1,0 +1,32 @@
+<mujoco model="standalone 100m lane camera test">
+  <compiler angle="radian"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+
+  <visual>
+    <headlight diffuse="0.75 0.75 0.75" ambient="0.35 0.35 0.35" specular="0 0 0"/>
+    <global offwidth="640" offheight="480"/>
+  </visual>
+
+  <asset>
+    <material name="track" rgba="0.04 0.20 0.55 1" reflectance="0"/>
+    <material name="white_line" rgba="0.96 0.96 0.96 1" reflectance="0"/>
+  </asset>
+
+  <worldbody>
+    <light pos="30 0 12" dir="0 0 -1" directional="true"/>
+    <geom name="track_floor" type="plane" size="0 0 0.05" material="track"/>
+    <geom name="left_lane_line" type="box" pos="50 1.0 0.002"
+          size="52.5 0.05 0.002" material="white_line" contype="0" conaffinity="0"/>
+    <geom name="right_lane_line" type="box" pos="50 -1.0 0.002"
+          size="52.5 0.05 0.002" material="white_line" contype="0" conaffinity="0"/>
+    <geom name="finish_line" type="box" pos="100 0 0.002"
+          size="0.05 1.0 0.002" material="white_line" contype="0" conaffinity="0"/>
+
+    <body name="camera_rig" mocap="true" pos="0 0 1.18">
+      <!-- Camera +X points to image right; camera looks along local -Z.
+           These axes make it look robot-forward (+X) and 24 degrees down. -->
+      <camera name="d435i_rgb" mode="fixed" pos="0 0 0"
+              xyaxes="0 -1 0 0.406736 0 0.913545" fovy="58"/>
+    </body>
+  </worldbody>
+</mujoco>
