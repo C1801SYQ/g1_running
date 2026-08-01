@@ -86,8 +86,7 @@ g1_race_vision/
 │   ├── run_vm_full_demo.sh
 │   └── start_vm_gui.sh
 ├── assets/                     # 独立视觉闭环测试场景
-├── tests/                      # 检测器、控制器和场景测试
-└── docs/PROJECT_INTRO.md       # 求职 / 保研项目介绍模板
+└── tests/                      # 检测器、控制器和场景测试
 ```
 
 ## 环境要求
