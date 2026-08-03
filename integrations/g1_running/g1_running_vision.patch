@@ -1,0 +1,50 @@
+diff --git a/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp b/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
+index 9c41970..09544ad 100644
+--- a/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
++++ b/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
+@@ -75,7 +75,11 @@ public:
+         }
+         if (percent_getup >= 1.0f)
+         {
+-            if (rl.control.current_keyboard == Input::Keyboard::Num1 || rl.control.current_gamepad == Input::Gamepad::RB_DPadUp)
++            if (rl.control.current_keyboard == Input::Keyboard::Num5 || rl.control.current_gamepad == Input::Gamepad::LB_DPadUp)
++            {
++                return "RLFSMStateRLRunning";
++            }
++            else if (rl.control.current_keyboard == Input::Keyboard::Num1 || rl.control.current_gamepad == Input::Gamepad::RB_DPadUp)
+             {
+                 return "RLFSMStateRLRoboMimicLocomotion";
+             }
+diff --git a/rl_sar/src/rl_sar/include/rl_real_g1.hpp b/rl_sar/src/rl_sar/include/rl_real_g1.hpp
+index 37e1904..09753cd 100644
+--- a/rl_sar/src/rl_sar/include/rl_real_g1.hpp
++++ b/rl_sar/src/rl_sar/include/rl_real_g1.hpp
+@@ -15,6 +15,7 @@
+ #include "inference_runtime.hpp"
+ #include "loop.hpp"
+ #include "fsm_g1.hpp"
++#include "vision_udp_command.hpp"
+
+ #include <unitree/robot/channel/channel_publisher.hpp>
+ #include <unitree/robot/channel/channel_subscriber.hpp>
+@@ -253,6 +254,7 @@ private:
+     uint8_t mode_machine;
+     Gamepad gamepad;
+     REMOTE_DATA_RX remote_data_rx;
++    VisionUdpCommandReceiver vision_udp_command;
+     ChannelPublisherPtr<LowCmd_> lowcmd_publisher;
+     ChannelSubscriberPtr<LowState_> lowstate_subscriber;
+     ChannelSubscriberPtr<IMUState_> imutorso_subscriber;
+diff --git a/rl_sar/src/rl_sar/src/rl_real_g1.cpp b/rl_sar/src/rl_sar/src/rl_real_g1.cpp
+index 75e761d..570f5e7 100644
+--- a/rl_sar/src/rl_sar/src/rl_real_g1.cpp
++++ b/rl_sar/src/rl_sar/src/rl_real_g1.cpp
+@@ -151,6 +151,8 @@ void RL_Real::GetState(RobotState<float> *state)
+     this->control.x = this->gamepad.ly;
+     this->control.y = -this->gamepad.lx;
+     this->control.yaw = -this->gamepad.rx;
++    this->vision_udp_command.Apply(
++        this->control.x, this->control.y, this->control.yaw);
+
+     state->imu.quaternion[0] = this->unitree_low_state.imu_state().quaternion()[0]; // w
+     state->imu.quaternion[1] = this->unitree_low_state.imu_state().quaternion()[1]; // x

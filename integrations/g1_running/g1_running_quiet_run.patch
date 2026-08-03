@@ -1,0 +1,15 @@
+diff --git a/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp b/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
+--- a/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
++++ b/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
+@@ -507,6 +507,10 @@ public:
+     {
+         if (!rl.rl_init_done) rl.rl_init_done = true;
+
+-        std::cout << "\r\033[K" << std::flush << LOGGER::INFO << "RL Run x:" << rl.control.x << " y:" << rl.control.y << " yaw:" << rl.control.yaw << std::flush;
++        const char *verbose_running = std::getenv("G1_VERBOSE_RUNNING");
++        if (verbose_running != nullptr && std::string(verbose_running) == "1")
++        {
++            std::cout << "\r\033[K" << std::flush << LOGGER::INFO << "RL Run x:" << rl.control.x << " y:" << rl.control.y << " yaw:" << rl.control.yaw << std::flush;
++        }
+         RLControl();
+     }

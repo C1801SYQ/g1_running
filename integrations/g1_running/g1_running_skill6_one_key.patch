@@ -1,0 +1,49 @@
+diff --git a/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp b/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
+--- a/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
++++ b/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
+@@ -47,6 +47,11 @@ public:
+         {
+             return "RLFSMStateGetUp";
+         }
++        else if (rl.control.current_keyboard == Input::Keyboard::Num6 || rl.control.current_gamepad == Input::Gamepad::LB_DPadDown)
++        {
++            VisionSprintMode::RequestLaunch();
++            return "RLFSMStateGetUp";
++        }
+         return state_name_;
+     }
+ };
+@@ -75,6 +80,10 @@ public:
+         {
+             return "RLFSMStatePassive";
+         }
++        if (rl.control.current_keyboard == Input::Keyboard::Num6 || rl.control.current_gamepad == Input::Gamepad::LB_DPadDown)
++        {
++            VisionSprintMode::RequestLaunch();
++        }
+         if (percent_getup >= 1.0f)
+         {
+             const char *auto_vision_sprint =
+@@ -86,6 +95,10 @@ public:
+             {
+                 return "RLFSMStateRLVisionSprint100m";
+             }
++            if (VisionSprintMode::ConsumeLaunchRequest())
++            {
++                return "RLFSMStateRLVisionSprint100m";
++            }
+             const char *auto_running = std::getenv("G1_AUTO_RUNNING");
+             if (auto_running != nullptr && std::string(auto_running) == "1")
+             {
+@@ -93,10 +106,6 @@ public:
+                 return "RLFSMStateRLRunning";
+             }
+-            if (rl.control.current_keyboard == Input::Keyboard::Num6 || rl.control.current_gamepad == Input::Gamepad::LB_DPadDown)
+-            {
+-                return "RLFSMStateRLVisionSprint100m";
+-            }
+-            else if (rl.control.current_keyboard == Input::Keyboard::Num5 || rl.control.current_gamepad == Input::Gamepad::LB_DPadUp)
++            if (rl.control.current_keyboard == Input::Keyboard::Num5 || rl.control.current_gamepad == Input::Gamepad::LB_DPadUp)
+             {
+                 return "RLFSMStateRLRunning";
+             }

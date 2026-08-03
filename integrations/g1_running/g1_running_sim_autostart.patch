@@ -1,0 +1,25 @@
+diff --git a/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp b/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
+--- a/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
++++ b/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
+@@ -6,7 +6,9 @@
+ #define G1_FSM_HPP
+
+ #include "fsm.hpp"
+ #include "rl_sdk.hpp"
++
++#include <cstdlib>
+
+ namespace g1_fsm
+ {
+@@ -75,6 +77,11 @@ public:
+         }
+         if (percent_getup >= 1.0f)
+         {
++            const char *auto_running = std::getenv("G1_AUTO_RUNNING");
++            if (auto_running != nullptr && std::string(auto_running) == "1")
++            {
++                return "RLFSMStateRLRunning";
++            }
+             if (rl.control.current_keyboard == Input::Keyboard::Num5 || rl.control.current_gamepad == Input::Gamepad::LB_DPadUp)
+             {
+                 return "RLFSMStateRLRunning";
