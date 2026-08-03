@@ -1,202 +1,235 @@
-# Unitree G1 视觉自主百米冲刺
+# G1 29-DOF Running RL
 
-[English](README_EN.md) | 中文
+基于 [Zolkin1/robot_rl](https://github.com/Zolkin1/robot_rl) 和 [fan-ziqi/rl_sar](https://github.com/fan-ziqi/rl_sar) 改编。Apache 2.0 协议。
 
-基于 **MuJoCo、Unitree G1、D435i 类 RGB-D 相机与强化学习跑步策略**构建的视觉闭环百米冲刺系统。机器人通过机载相机同时识别跑道两侧白线，融合 G1 IMU 航向进行高速纠偏；按下 `6` 后自动起立、进入冲刺状态，并在越过 100 m 终点后平滑减速。
+---
 
-> 当前成果已完成 MuJoCo 仿真验证，尚未声明完成真实 G1 的百米实机验证。
+## 项目概述
 
-![G1 双白线视觉识别面板](g1_camera_dashboard_official_track.png)
+在 G1 21 自由度跑步策略基础上扩展为 **29 自由度**全身跑步，训练策略实现 0~5.1 m/s 变速跑步 + 转向，并通过 rl_sar 框架部署到 MuJoCo 仿真和实体机器人。
 
-## 项目亮点
+**最终成果：** speed_turn 模型实现 4.94 m/s 实际极速，支持站立/变速/转向。
 
-- **强化学习运动控制**：复用 [`C1801SYQ/g1_running`](https://github.com/C1801SYQ/g1_running) 的 29 自由度 `running` TorchScript policy，视觉层只输出 `vx / wz`，不直接干预关节力矩。
-- **严格双线识别**：基于 RGB 的 HSV 白色分割、形态学处理、连通区域筛选与直线拟合；必须同时检测两条真实边界才更新视觉控制。
-- **赛道身份锁定**：使用线对宽度、中心位置和时间连续性约束，避免高速运动时误选相邻跑道。
-- **视觉与 IMU 融合**：视觉负责横向位置纠偏，G1 IMU 提供直线航向保持，降低跑步摆动造成的视觉航向噪声。
-- **Skill 6 状态机**：保留原 Skill 5 手动跑步状态，新增按键 `6` 的视觉百米状态；从 Passive 按 `6` 会先自动起立，再接管视觉速度命令。
-- **完整比赛生命周期**：起跑保护、相机锁线、加速冲刺、100 m 计时、终点后继续巡线减速、自动回到 Passive。
-- **工程化联调**：包含 Conda 环境、CycloneDDS、Unitree DDS 桥、MuJoCo 场景生成、启动/停止脚本及单元测试。
+---
 
-## 仿真验证结果
+## 环境依赖
 
-测试场景为蓝色四跑道直道，目标跑道白线中心距 2.1 m（两条 10 cm 白线之间的净宽约 2.0 m），100 m 终点后保留 15 m 减速缓冲区。
+- Ubuntu 22.04
+- NVIDIA RTX 5090 (32GB VRAM)
+- IsaacSim 5.0 (IsaacLab)
+- Conda env: `env_isaaclab` 或 `isaac_rl_v2`
+- MuJoCo 3.2.7
+- CUDA 13.0 / Driver 580.173
 
-| 指标 | 验证结果 |
-| --- | ---: |
-| 仿真控制段 100 m 用时 | 25.64 s |
-| 平均前进速度 | 3.90 m/s |
-| 最大速度指令 | 5.10 m/s |
-| 双白线有效帧比例 | 98.6% |
-| 百米段最大骨盆横向偏移 | 0.559 m |
-| 完全停止位置 | 112.05 m |
-| 跌倒 / 相邻跑道切换 | 0 / 0 |
-
-以上是 MuJoCo 联合仿真数据，计时从视觉锁线并开始加速时计算，不等同于官方赛事计时结果。
-
-## 系统架构
-
-```mermaid
-flowchart LR
-    A["MuJoCo G1 + D435i 类相机"] --> B["RGB / 可选深度渲染"]
-    B --> C["HSV 白线分割与直线拟合"]
-    C --> D["双线验证与目标跑道锁定"]
-    D --> E["横向误差 + 视觉航向误差"]
-    F["G1 IMU 航向"] --> G["视觉 / IMU 融合控制器"]
-    E --> G
-    G --> H["UDP: vx, vy=0, wz"]
-    H --> I["rl_sar Skill 6"]
-    I --> J["Skill 5 running policy"]
-    J --> A
-```
-
-控制逻辑坚持分层设计：视觉模块只生成机器人速度层命令，稳定跑步和全身关节协调由训练好的 RL policy 完成。
-
-## Skill 6 状态机
-
-```text
-按键 6
-  └─ Passive → GetUp → VisionSprint100m
-                          ├─ 等待机器人稳定
-                          ├─ 锁定目标跑道的两条白线
-                          ├─ 加速并进行视觉 / IMU 纠偏
-                          ├─ 穿过 x = 100 m 后开始减速
-                          ├─ 减速期间继续双线纠偏
-                          └─ 完全停止 → Passive
-```
-
-视觉 UDP 只在 Skill 6 中生效，不会覆盖 Skill 5 的手柄控制。视觉进程超过 300 ms 没有发送新命令时，接收端会强制输出零速度。
+---
 
 ## 目录结构
 
-```text
-g1_race_vision/
-├── g1_race_vision/
-│   ├── line_detector.py        # 双白线检测与跑道身份锁定
-│   ├── controller.py           # 视觉 / IMU 融合与终点减速控制
-│   ├── rendering.py            # MuJoCo RGB-D 渲染
-│   └── udp_command.py          # 速度命令发送与看门狗
-├── integrations/
-│   ├── g1_running/             # rl_sar Skill 6、UDP 接口及可复现补丁
-│   └── unitree_rl_mjlab/       # 早期 ONNX 接入参考
-├── scripts/
-│   ├── prepare_unitree_scene.py
-│   ├── run_unitree_camera_sim.py
-│   ├── install_g1_running.sh
-│   ├── run_vm_full_demo.sh
-│   └── start_vm_gui.sh
-├── assets/                     # 独立视觉闭环测试场景
-└── tests/                      # 检测器、控制器和场景测试
+```
+├── robot_rl/                    # RL 训练框架
+│   ├── scripts/rsl_rl/          # 训练/测试/导出脚本
+│   ├── source/robot_rl/         # 核心代码
+│   │   └── robot_rl/tasks/manager_based/robot_rl/
+│   │       ├── g1/              # G1 环境配置
+│   │       │   ├── g1_running_clf_29dof_env_cfg.py  # 29dof 跑步训练配置
+│   │       │   └── agents/      # PPO 策略配置
+│   │       └── mdp/             # MDP 组件 (rewards/commands/terminations/events)
+│   ├── transfer/sim/            # MuJoCo sim2sim 验证
+│   ├── transfer/obelisk/        # Obelisk 实体部署 (ROS2)
+│   ├── models/                  # 训练好的策略文件
+│   │   ├── speed_turn/          # ★ 最佳模型 (4.94 m/s)
+│   │   └── standrun/            # 站立+跑步模型
+│   └── trajectories/running/    # 跑步步态轨迹库 (1.2~5.0 m/s)
+│
+└── rl_sar/                      # 仿真部署框架 (C++/Python)
+    ├── policy/g1/running/       # 策略加载配置
+    ├── src/rl_sar/              # 核心代码
+    │   ├── fsm_robot/fsm_g1.hpp # G1 状态机 (含跑步策略状态)
+    │   ├── library/core/rl_sdk/ # RL SDK (观测/输出/PID)
+    │   └── src/rl_sim_mujoco.cpp # MuJoCo 仿真器
+    └── cmake_build/bin/         # 编译产物
 ```
 
-## 环境要求
+---
 
-- Ubuntu 22.04
-- Python 3.11（推荐 Conda）
-- MuJoCo Python 3.x
-- Unitree `unitree_mujoco`
-- Unitree SDK2 / `unitree_sdk2_python`
-- CMake、C++17、LibTorch / ONNX Runtime（由 `g1_running` 安装脚本处理）
-- 可选：ROS 2 Humble 与 RealSense ROS，用于后续实机相机接入
+## 核心修改清单
 
-项目固定使用 `g1_running` 提交：
+### 1. 29 自由度适配 (robot_rl)
 
-```text
-4d06065aa9445b8af4db5d465fa79f67736e5e36
-```
+| 文件 | 修改内容 |
+|------|----------|
+| `g1_running_clf_29dof_env_cfg.py` | 新建 29dof 训练配置，轨迹库路径、速度范围、随机化参数 |
+| `g1_29dof.py` | 新建 29dof 机器人 USD 定义（含 waist_roll/pitch + 6 wrist） |
+| `__init__.py` | 注册 `G1-running-clf-29dof` 和 `G1-running-clf-29dof-play` |
+| `physical_randomization.py` | 对齐 21dof 随机化范围（原 29dof 配置 10-20x 过宽） |
+| `rewards.py` | 新增 `joint_pos_default_reward`（惩罚未跟踪的额外关节漂移） |
+| `resets.py` | 修复 extra joints 初始化（waist/wrist 用 default_pos 而非 0） |
+| `symmetry_functions.py` | 重写 `_switch_g1_joints` 为 29 关节索引映射（原 21 关节版本导致手臂不对称） |
+| `train_policy.py` / `play_policy.py` | 新增 `running_clf_29dof` 环境类型映射 |
+| `g1_running_clf_env_cfg.py` | 速度范围 1.0→5.1，轨迹随机化对齐 |
 
-## 安装
+### 2. 速度优先训练策略
 
-### 1. Python 环境
+| 参数 | 初始值 | 调整值 | 原因 |
+|------|--------|--------|------|
+| CLF_WEIGHT | 10.0 | **1.0** | 降低轨迹追踪约束，给速度让路 |
+| xy_vel weight | 1.0 | **10.0** | 速度跟踪优先于轨迹精度 |
+| yaw_vel weight | 1.0 | **8.0** | 强化转向跟踪 |
+| arm Q weights | 3.0 | **20.0** | 恢复手臂摆臂（高速时不摆臂影响平衡） |
+| speed range | 1.0-5.1 | **0.0-5.1** | 零速也训练，学会站立 |
+| heading | 无 | **±3.14 + rel_heading_envs=0.2** | 20% 环境训练转向 |
+| ang_vel_z | ±0.75 | **±1.5** | 大角度转向 |
+
+### 3. Sim2Sim MuJoCo 修复 (robot_rl/transfer/sim)
+
+| 文件 | 修改内容 |
+|------|----------|
+| `robot.py` | **恢复原始 PD 设置** — `gainprm[0]=kp, biasprm[1]=-kp, biasprm[2]=-kd`（原本地修改版误加了 `gainprm[1]=kd` 和 Unitree 增益覆盖，导致 Sim2Sim gap） |
+| `robot.py` | 移除机器人名称硬编码限制（添加 29dof 支持） |
+| `rl_policy.py` | 修复策略加载路径解析（支持绝对路径） |
+
+### 4. rl_sar 部署适配
+
+| 文件 | 修改内容 |
+|------|----------|
+| `fsm_g1.hpp` | **新建 `RLFSMStateRLRunning`** — 跑步策略状态机（Enter/Run/Exit/CheckChange） |
+| `fsm_g1.hpp` | 注册到工厂 + 按键 Num5/LB_DPadUp 切换 + GetUp→Running 过渡 |
+| `rl_sdk.cpp` | **新增 `phase_sin_cos` 观测** — 计算 sin(2πφ)/cos(2πφ) 步态相位（原框架无此观测） |
+| `rl_sdk.hpp` | 新增 `base_position` 字段到 RobotState（用于真距离估算） |
+| `rl_sim_mujoco.cpp` | 从 `mjData->qpos` 读取 base 位置 |
+| `policy/g1/running/config.yaml` | 新建 29dof 跑步策略配置（98 维观测、29 维动作、KP/KD/action_scale/joint_mapping） |
+
+---
+
+## 训练历程
+
+| 阶段 | 模型 | 迭代数 | 速度范围 | 特点 | 极速 |
+|------|------|--------|----------|------|------|
+| 1 | `2026-07-24_15-42-49` | 3,200 | 1.0-3.7 | 首次成功训练，对齐 21dof 随机化 | ~2.6 m/s |
+| 2 | `highspeed` | 9,999 | 1.0-5.1 | 外推轨迹 4.0-5.0（时间缩放，物理不可行） | ~3.0 m/s |
+| 3 | `highspeed_v2` | 9,999 | 1.0-5.1 | 修复外推轨迹（只缩放 T，不缩放关节） | ~2.6 m/s |
+| 4 | `standrun` | 9,999 | **0.0-5.1** | **首次包含零速站立训练** | 4.75 m/s |
+| 5 | `rough_turn` | 5,000 | 0.0-5.1 | 粗糙地形+转向（续训 standrun） | 2.6 m/s (地形太保守) |
+| 6 | **`speed_turn`** | 10,000 | 0.0-5.1 | **速度权重 10x + 转向（续训 standrun）** | **4.94 m/s** ★ |
+| 7 | `speed_turn_v2` | 训练中 | 0.0-5.1 | 手臂 Q 权重 20x 恢复摆臂（续训 speed_turn） | - |
+
+---
+
+## 使用方法
+
+### 训练
 
 ```bash
-cd ~/g1_race_vision
-conda create -n g1race python=3.11 -y
-conda activate g1race
-python -m pip install -r requirements.txt
+cd robot_rl
+conda activate env_isaaclab
+pip install -e source/robot_rl/
+
+# 全新训练
+/home/ubuntu/IsaacLab/isaaclab.sh -p scripts/rsl_rl/train_policy.py \
+    --env_type=running_clf_29dof --headless --num_envs=4096 --max_iterations=10000 \
+    --logger tensorboard
+
+# 续训（从已有 checkpoint 恢复）
+/home/ubuntu/IsaacLab/isaaclab.sh -p scripts/rsl_rl/train_policy.py \
+    --env_type=running_clf_29dof --headless --num_envs=4096 --max_iterations=10000 \
+    --logger tensorboard --resume --load_run=<RUN_DIR> --checkpoint=model_9999
 ```
 
-### 2. CycloneDDS 与跑步策略
+### 导出策略
 
 ```bash
-cd ~/g1_race_vision
-bash scripts/install_cyclonedds_runtime.sh
-bash scripts/install_g1_running.sh
+/home/ubuntu/IsaacLab/isaaclab.sh -p scripts/rsl_rl/play_policy.py \
+    --env_type=running_clf_29dof --num_envs=1 --export_policy --headless \
+    --load_run=<RUN_DIR> --checkpoint=model_<ITER> --logger tensorboard
 ```
 
-安装脚本会校验固定版本和 `policy.pt` 的 SHA-256，应用 Skill 6 补丁并只编译 G1 控制器。
-
-### 3. 创建启动命令
+### MuJoCo 仿真测试 (robot_rl/transfer/sim)
 
 ```bash
-install -m 0755 scripts/start_vm_gui.sh ~/start_g1_race.sh
-install -m 0755 scripts/stop_vm_gui.sh ~/stop_g1_race.sh
+cd robot_rl
+source ~/anaconda3/etc/profile.d/conda.sh && conda activate env_isaaclab
+export PYTHONPATH=$PWD/transfer:$PYTHONPATH
+python transfer/sim/g1_runner.py --env_type=running_clf_29dof \
+    --scene=29dof_basic_scene --load_run=<RUN_DIR> --log
 ```
 
-## 运行
-
-启动完整 MuJoCo、G1 policy、机器人视角和白线识别：
+### MuJoCo 仿真测试 (rl_sar)
 
 ```bash
-bash ~/start_g1_race.sh
+cd rl_sar
+./build.sh -mj                                    # 编译（仅首次）
+./cmake_build/bin/rl_sim_mujoco g1 scene_29dof   # 运行
+
+# 键盘控制
+0 / A         → 起身站立
+5 / LB_DPadUp → 切换到跑步策略
+W/S           → 前进/后退
+A/D           → 左右平移
+Q/E           → 左右转向
+P / LB_X      → 被动模式（急停）
 ```
 
-脚本会自动发送按键 `6`，流程为：
+### 实体部署（Obelisk）
 
-```text
-Passive → GetUp → Skill 6 → 双线巡线冲刺 → 100 m 后减速 → Passive
+详见 `robot_rl/transfer/obelisk/README.md` 和 `robot_rl/DEPLOY_GUIDE.txt`
+
+---
+
+## 关键 Bug 修复记录
+
+1. **PD 增益 Bug** (robot.py): 本地修改版加了 `gainprm[1]=kd` 和 Unitree 增益覆盖，导致 Sim2Sim gap。恢复原始 Zolkin1 方案解决。
+
+2. **对称数据增强 Bug** (symmetry_functions.py): `_switch_g1_joints` 硬编码 21 关节索引，29dof 训练时手臂映射全错。重写为 29 关节版本。
+
+3. **外推轨迹 Bug** (extrapolate_traj.py): 时间缩放时同时缩放 T 和 qd 系数，导致双重速度缩放。修正为只缩放 T（轨迹管理器自动处理速度缩放）。
+
+4. **GPU 驱动不匹配**: Driver 580.159 (内核) vs 580.173 (用户态)，导致 CUDA 死锁（18h 只跑 2 iter）。重启后对齐解决。
+
+5. **rl_sar 训练稳定后 IsaacSim Play 摔倒**: Play config 禁用随机化，策略依赖训练时的随机化鲁棒性。
+
+6. **rl_sar GetUp→Running 关节状态映射错误**: 两个状态使用不同 `joint_mapping`，切换时状态索引错乱。
+
+---
+
+## 轨迹库
+
+`trajectories/running/` 包含 1.2~5.0 m/s 的跑步步态（5 阶 Bezier 曲线）。4.0~5.0 m/s 为从 3.6 m/s 外推生成（仅缩放 T，保持关节轨迹形状）。
+
+---
+
+## 模型文件
+
+| 文件 | 说明 |
+|------|------|
+| `models/speed_turn/policy.pt` | ★ 最佳 29dof 跑步策略 (JIT TorchScript) |
+| `models/speed_turn/policy_parameters.yaml` | 策略参数（观测/动作/KP/KD/默认关节角） |
+| `models/standrun/policy.pt` | 站立+跑步策略（速度优先权重较低版） |
+
+---
+
+## 引用
+
+```
+@software{Zolkin_robot_rl,
+  author = {Zachary Olkin},
+  title = {robot_rl: Reinforcement Learning for Humanoid Robots},
+  url = {https://github.com/Zolkin1/robot_rl},
+  year = {2026}
+}
+
+@software{fan-ziqi2024rl_sar,
+  author = {fan-ziqi},
+  title = {rl_sar: Simulation Verification and Physical Deployment of Robot Reinforcement Learning},
+  url = {https://github.com/fan-ziqi/rl_sar},
+  year = {2024}
+}
 ```
 
-再次执行同一命令会自动关闭上一轮已完成的定格窗口并开始新一轮。
+---
+## 视觉集成模块
 
-停止全部进程：
-
-```bash
-bash ~/stop_g1_race.sh
-```
-
-查看实时状态：
-
-```bash
-tail -f ~/g1_race_run.log
-```
-
-## 测试
-
-```bash
-cd ~/g1_race_vision
-conda activate g1race
-python -m unittest discover -s tests -v
-```
-
-当前共有 22 项单元测试，覆盖：
-
-- 双线有效性、单线拒绝和相邻跑道防跳变；
-- 横向纠偏方向、加减速限幅、视觉丢失保护；
-- 终点前保持速度和终点后巡线减速；
-- 四跑道、10 cm 白线、100 m 终点和 15 m 缓冲区场景生成。
-
-## 实机迁移思路
-
-`scripts/run_realsense_ros2.py` 提供 RealSense ROS 2 输入接口，可订阅彩色图、对齐深度并复用同一视觉控制器。实机部署前仍需完成：
-
-1. 相机外参、曝光和运动模糊标定；
-2. 真机低速架空测试与急停链路验证；
-3. 5 m、10 m、20 m、50 m、100 m 分阶段提速；
-4. roll / pitch、通信超时和越线风险的独立安全监控；
-5. 真实赛场光照、阴影、磨损白线和其他机器人干扰测试。
-
-请勿直接把仿真中的 `5.10 m/s` 指令用于真机首次测试。
-
-## 可展示的技术关键词
-
-`Humanoid Robotics` · `Reinforcement Learning` · `MuJoCo` · `Computer Vision` · `RGB-D` · `Finite-State Machine` · `Sensor Fusion` · `ROS 2` · `Unitree SDK2` · `Sim-to-Real`
-
-## 致谢与引用
-
-- [Unitree Robotics / unitree_mujoco](https://github.com/unitreerobotics/unitree_mujoco)
-- [C1801SYQ / g1_running](https://github.com/C1801SYQ/g1_running)
-- [MuJoCo Python API](https://mujoco.readthedocs.io/en/stable/python.html)
-- [RealSense ROS](https://github.com/realsenseai/realsense-ros)
-
-本仓库不重复分发 Unitree 官方仓库或 `g1_running` 的完整第三方依赖，仅保存集成代码、固定版本信息和可复现补丁。使用第三方组件时请遵守其各自许可证。
+来自 [MS-handsome6](https://github.com/MS-handsome6) 的贡献：
+-  — 视觉闭环百米冲刺系统
+- 机载相机识别跑道白线 + G1 IMU 航向纠偏
+- MuJoCo 仿真验证完成
+- 详见: https://github.com/MS-handsome6/g1_race_vision
