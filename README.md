@@ -226,10 +226,10 @@ P / LB_X      → 被动模式（急停）
 ```
 
 ---
+
 ## 视觉集成模块
 
-来自 [MS-handsome6](https://github.com/MS-handsome6) 的贡献：
--  — 视觉闭环百米冲刺系统
+`vision/` 目录来自 [MS-handsome6](https://github.com/MS-handsome6) 贡献：
+- 视觉闭环百米冲刺系统
 - 机载相机识别跑道白线 + G1 IMU 航向纠偏
 - MuJoCo 仿真验证完成
-- 详见: https://github.com/MS-handsome6/g1_race_vision
