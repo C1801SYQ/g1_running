@@ -4,7 +4,8 @@ set -euo pipefail
 PID_FILE="${HOME}/.g1_race_gui.pid"
 
 if [[ ! -f "${PID_FILE}" ]]; then
-    echo "没有找到正在运行的 G1 仿真。"
+    echo "没有找到旧版后台启动的 G1 仿真。"
+    echo "当前前台交互启动方式请在 rl_sar 控制终端按 Ctrl+C 停止。"
     exit 0
 fi
 

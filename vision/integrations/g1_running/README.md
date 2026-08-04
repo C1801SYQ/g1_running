@@ -21,9 +21,12 @@ license: Apache-2.0
 - `g1_running_quiet_getup.patch`：关闭 200 Hz 起身进度条，避免虚拟机终端
   输出阻塞控制循环；不改变起身轨迹、增益或策略权重。
 - `g1_running_sim_autostart.patch`：只有设置 `G1_AUTO_RUNNING=1` 时，起身
-  完成后自动进入 Running；完整仿真脚本会设置它，真机脚本绝不能设置。
+  完成后自动进入原 Skill 5 Running；视觉 Skill 6 启动脚本不会设置它。
 - `g1_running_quiet_run.patch`：默认关闭 200 Hz 的 Running 状态文本，减轻
   虚拟机终端负担；调试时设置 `G1_VERBOSE_RUNNING=1` 可以重新显示。
+- `g1_running_skill6.patch`：注册视觉百米冲刺 Skill 6。它只允许从状态 1
+  `RLFSMStateRLRoboMimicLocomotion` 按 `6` 进入；Passive、GetUp、
+  GetDown 和 Skill 5 中的 `6` 均不会触发自动起立或冲刺。
 - 收到第一个视觉包后，如果超过 300 ms 没有新包，输出速度自动归零。
 - `speed_turn` 训练时横向速度范围为零，因此这里强制 `vy=0`，通过 `wz`
   转向纠偏。

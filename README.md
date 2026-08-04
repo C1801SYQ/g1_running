@@ -233,3 +233,10 @@ P / LB_X      → 被动模式（急停）
 - 视觉闭环百米冲刺系统
 - 机载相机识别跑道白线 + G1 IMU 航向纠偏
 - MuJoCo 仿真验证完成
+
+Skill 6 复用原有 `running` policy，不替换 Skill 5。控制器必须按
+`0 → 1 → 6` 的顺序操作：先从 Passive 起立，再进入状态 1，最后启动
+视觉百米冲刺；按 `6` 不会从 Passive 或 GetUp 自动起立。
+
+安装、DDS/Conda 配置、启动方式和仿真结果见
+[`vision/README.md`](vision/README.md)。

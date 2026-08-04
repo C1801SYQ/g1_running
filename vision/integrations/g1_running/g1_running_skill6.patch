@@ -1,7 +1,8 @@
 diff --git a/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp b/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
+index 142b5b3..27e883f 100644
 --- a/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
 +++ b/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp
-@@ -7,6 +7,7 @@
+@@ -8,6 +8,7 @@
 
  #include "fsm.hpp"
  #include "rl_sdk.hpp"
@@ -9,68 +10,24 @@ diff --git a/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp b/rl_sar/src/rl_sar/fsm_robo
 
  #include <cstdlib>
 
-@@ -77,12 +78,23 @@ public:
-         }
-         if (percent_getup >= 1.0f)
-         {
-+            const char *auto_vision_sprint =
-+                std::getenv("G1_AUTO_VISION_SPRINT");
-+            if (auto_vision_sprint != nullptr &&
-+                std::string(auto_vision_sprint) == "1")
-+            {
-+                return "RLFSMStateRLVisionSprint100m";
-+            }
-             const char *auto_running = std::getenv("G1_AUTO_RUNNING");
-             if (auto_running != nullptr && std::string(auto_running) == "1")
-             {
-                 return "RLFSMStateRLRunning";
-             }
--            if (rl.control.current_keyboard == Input::Keyboard::Num5 || rl.control.current_gamepad == Input::Gamepad::LB_DPadUp)
-+            if (rl.control.current_keyboard == Input::Keyboard::Num6 || rl.control.current_gamepad == Input::Gamepad::LB_DPadDown)
-+            {
-+                return "RLFSMStateRLVisionSprint100m";
-+            }
-+            else if (rl.control.current_keyboard == Input::Keyboard::Num5 || rl.control.current_gamepad == Input::Gamepad::LB_DPadUp)
-             {
-                 return "RLFSMStateRLRunning";
-             }
-@@ -122,6 +137,10 @@ public:
+@@ -215,6 +216,13 @@ RLFSMStateRLRoboMimicLocomotion(RL *rl) : RLFSMState(*rl, "RLFSMStateRLRoboMimic
          {
              return "RLFSMStateRLRunning";
          }
 +        else if (rl.control.current_keyboard == Input::Keyboard::Num6 || rl.control.current_gamepad == Input::Gamepad::LB_DPadDown)
 +        {
++            // Skill 6 is intentionally reachable only from state 1. The
++            // operator must first complete 0 -> GetUp and then press 1 to
++            // enter this stable locomotion/standing state.
 +            return "RLFSMStateRLVisionSprint100m";
 +        }
          return state_name_;
      }
  };
-@@ -204,6 +223,10 @@ RLFSMStateRLRoboMimicLocomotion(RL *rl) : RLFSMState(*rl, "RLFSMStateRLRoboMimic
-         {
-             return "RLFSMStateRLRunning";
-         }
-+        else if (rl.control.current_keyboard == Input::Keyboard::Num6 || rl.control.current_gamepad == Input::Gamepad::LB_DPadDown)
-+        {
-+            return "RLFSMStateRLVisionSprint100m";
-+        }
-         return state_name_;
+@@ -545,6 +553,77 @@ public:
      }
  };
-@@ -521,11 +544,84 @@ public:
-             return "RLFSMStateGetUp";
-         else if (rl.control.current_keyboard == Input::Keyboard::Num1 || rl.control.current_gamepad == Input::Gamepad::RB_DPadUp)
-             return "RLFSMStateRLRoboMimicLocomotion";
-+        else if (rl.control.current_keyboard == Input::Keyboard::Num6 || rl.control.current_gamepad == Input::Gamepad::LB_DPadDown)
-+            return "RLFSMStateRLVisionSprint100m";
-+        return state_name_;
-+    }
-+
-+    void Exit() override
-+    {
-+        rl.rl_init_done = false;
-+    }
-+};
-+
+
 +class RLFSMStateRLVisionSprint100m : public RLFSMState
 +{
 +public:
@@ -129,19 +86,23 @@ diff --git a/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp b/rl_sar/src/rl_sar/fsm_robo
 +        if (rl.control.current_keyboard == Input::Keyboard::Num5 ||
 +            rl.control.current_gamepad == Input::Gamepad::LB_DPadUp)
 +            return "RLFSMStateRLRunning";
-         return state_name_;
-     }
-
-     void Exit() override
-     {
++        return state_name_;
++    }
++
++    void Exit() override
++    {
 +        VisionSprintMode::SetEnabled(false);
 +        rl.control.x = 0.0f;
 +        rl.control.y = 0.0f;
 +        rl.control.yaw = 0.0f;
-         rl.rl_init_done = false;
-     }
- };
-@@ -553,6 +649,8 @@ public:
++        rl.rl_init_done = false;
++    }
++};
++
+ class G1FSMFactory : public FSMFactory
+ {
+ public:
+@@ -568,6 +647,8 @@ public:
              return std::make_shared<g1_fsm::RLFSMStateRLWholeBodyTrackingGangnamStyle>(rl);
          else if (state_name == "RLFSMStateRLRunning")
              return std::make_shared<RLFSMStateRLRunning>(rl);
@@ -150,7 +111,7 @@ diff --git a/rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp b/rl_sar/src/rl_sar/fsm_robo
          return nullptr;
      }
      std::string GetType() const override { return "g1"; }
-@@ -566,7 +664,8 @@ public:
+@@ -581,7 +662,8 @@ public:
              "RLFSMStateRLRoboMimicCharleston",
              "RLFSMStateRLWholeBodyTrackingDance102",
              "RLFSMStateRLWholeBodyTrackingGangnamStyle",

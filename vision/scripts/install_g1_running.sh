@@ -96,10 +96,6 @@ apply_patch_once \
     "${INTEGRATION}/g1_running_skill6.patch" \
     "rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp" \
     'RLFSMStateRLVisionSprint100m'
-apply_patch_once \
-    "${INTEGRATION}/g1_running_skill6_one_key.patch" \
-    "rl_sar/src/rl_sar/fsm_robot/fsm_g1.hpp" \
-    'VisionSprintMode::RequestLaunch()'
 
 policy_file="${TARGET_ROOT}/rl_sar/policy/g1/running/policy.pt"
 actual_sha256="$(sha256sum "${policy_file}" | awk '{print $1}')"

@@ -58,17 +58,6 @@ public:
         return GenerationCounter().load(std::memory_order_acquire);
     }
 
-    static void RequestLaunch()
-    {
-        LaunchRequestedFlag().store(true, std::memory_order_release);
-    }
-
-    static bool ConsumeLaunchRequest()
-    {
-        return LaunchRequestedFlag().exchange(
-            false, std::memory_order_acq_rel);
-    }
-
 private:
     static std::atomic<bool> &EnabledFlag()
     {
@@ -82,11 +71,6 @@ private:
         return generation;
     }
 
-    static std::atomic<bool> &LaunchRequestedFlag()
-    {
-        static std::atomic<bool> requested{false};
-        return requested;
-    }
 };
 
 class VisionUdpCommandReceiver
