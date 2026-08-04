@@ -37,12 +37,14 @@ public:
         if (enabled && !was_enabled)
         {
             GenerationCounter().fetch_add(1, std::memory_order_acq_rel);
+            NotifyState(true);
             std::cout
                 << "[skill6] visual 100 m sprint command mode enabled"
                 << std::endl;
         }
         else if (!enabled && was_enabled)
         {
+            NotifyState(false);
             std::cout << "[skill6] visual sprint command mode disabled"
                       << std::endl;
         }
@@ -69,6 +71,50 @@ private:
     {
         static std::atomic<std::uint64_t> generation{0};
         return generation;
+    }
+
+    static int StatusPort()
+    {
+        constexpr int default_port = 15002;
+        const char *text = std::getenv("G1_VISION_STATUS_PORT");
+        if (text == nullptr)
+        {
+            return default_port;
+        }
+        char *end = nullptr;
+        const long value = std::strtol(text, &end, 10);
+        if (end == text || *end != '\0' || value < 1 || value > 65535)
+        {
+            return default_port;
+        }
+        return static_cast<int>(value);
+    }
+
+    static void NotifyState(bool enabled)
+    {
+        const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (socket_fd < 0)
+        {
+            return;
+        }
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(static_cast<uint16_t>(StatusPort()));
+        const char *payload = enabled
+            ? "G1_VISION_SPRINT 1\n"
+            : "G1_VISION_SPRINT 0\n";
+        for (int attempt = 0; attempt < 3; ++attempt)
+        {
+            ::sendto(
+                socket_fd,
+                payload,
+                std::strlen(payload),
+                0,
+                reinterpret_cast<const sockaddr *>(&address),
+                sizeof(address));
+        }
+        ::close(socket_fd);
     }
 
 };

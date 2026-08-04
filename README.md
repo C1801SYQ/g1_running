@@ -237,6 +237,8 @@ P / LB_X      → 被动模式（急停）
 Skill 6 复用原有 `running` policy，不替换 Skill 5。控制器必须按
 `0 → 1 → 6` 的顺序操作：先从 Passive 起立，再进入状态 1，最后启动
 视觉百米冲刺；按 `6` 不会从 Passive 或 GetUp 自动起立。
+MuJoCo 的启动安全支撑会等待 C++ 确认进入 Skill 6 和双线锁定，不再因
+固定倒计时结束而让仍在操作状态机的机器人倒地。
 
 安装、DDS/Conda 配置、启动方式和仿真结果见
 [`vision/README.md`](vision/README.md)。

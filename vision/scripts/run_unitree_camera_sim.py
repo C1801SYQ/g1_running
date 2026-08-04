@@ -24,7 +24,10 @@ from g1_race_vision.controller import (
 )
 from g1_race_vision.line_detector import WhiteLaneDetector
 from g1_race_vision.rendering import MujocoRgbdRenderer
-from g1_race_vision.udp_command import UdpCommandSender
+from g1_race_vision.udp_command import (
+    UdpCommandSender,
+    UdpSkill6StatusReceiver,
+)
 
 DEBUG_WINDOW_NAME = "G1 robot camera - RGB-D lane detection"
 
@@ -155,6 +158,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--udp-host", default="127.0.0.1")
     parser.add_argument("--udp-port", type=int, default=15001)
+    parser.add_argument("--status-host", default="127.0.0.1")
+    parser.add_argument("--status-port", type=int, default=15002)
+    parser.add_argument(
+        "--skill6-stabilize-seconds",
+        type=float,
+        default=5.0,
+        help="Wait this long after the C++ controller enters Skill 6.",
+    )
     parser.add_argument("--show-debug", action="store_true")
     parser.add_argument(
         "--debug-snapshot",
@@ -211,6 +222,14 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Simulation-only duration used to fade out the torso support. "
             "A gradual release avoids an artificial camera-pose jump."
+        ),
+    )
+    parser.add_argument(
+        "--startup-support-until-skill6",
+        action="store_true",
+        help=(
+            "Keep the simulation safety tether active until the C++ FSM "
+            "actually enters Skill 6 and the target lane is locked."
         ),
     )
     parser.add_argument(
@@ -327,7 +346,9 @@ def main() -> None:
     support_yaw = yaw_from_wxyz(data.qpos[3:7])
     robot_mass = float(np.sum(model.body_mass))
     support_active = args.startup_support_seconds > 0.0
+    support_release_started_at: float | None = None
     fall_below_since: float | None = None
+    skill6_enabled = threading.Event()
     lane_lock_acquired = threading.Event()
     finish_line_crossed = threading.Event()
     race_finished = threading.Event()
@@ -363,6 +384,14 @@ def main() -> None:
         )
     )
     sender = UdpCommandSender(args.udp_host, args.udp_port)
+    status_receiver = UdpSkill6StatusReceiver(
+        args.status_host, args.status_port
+    )
+    print(
+        "[skill6] waiting for C++ FSM status on "
+        f"{status_receiver.address[0]}:{status_receiver.address[1]}",
+        flush=True,
+    )
 
     def is_running() -> bool:
         if stop.is_set():
@@ -374,6 +403,7 @@ def main() -> None:
 
     def physics_loop() -> None:
         nonlocal fall_below_since, support_active
+        nonlocal support_release_started_at
 
         def apply_start_heading_restraint(force: np.ndarray) -> None:
             yaw = yaw_from_wxyz(data.qpos[3:7])
@@ -382,6 +412,47 @@ def main() -> None:
                 np.clip(-120.0 * yaw_error - 24.0 * data.qvel[5], -90.0, 90.0)
             )
 
+        def apply_full_start_support(support_scale: float) -> None:
+            force = data.xfrc_applied[support_body_id]
+            force[:] = 0.0
+            force[0] = support_scale * float(
+                np.clip(-90.0 * data.qvel[0], -180.0, 180.0)
+            )
+            force[1] = support_scale * float(
+                np.clip(-90.0 * data.qvel[1], -180.0, 180.0)
+            )
+            force[2] = support_scale * float(
+                np.clip(
+                    robot_mass * 9.81
+                    + 900.0 * (support_z - data.qpos[2])
+                    - 120.0 * data.qvel[2],
+                    0.0,
+                    robot_mass * 9.81 * 2.0,
+                )
+            )
+            apply_start_heading_restraint(force)
+
+        def apply_start_block_restraint() -> None:
+            force = data.xfrc_applied[support_body_id]
+            force[:] = 0.0
+            force[0] = float(
+                np.clip(
+                    -240.0 * (data.qpos[0] - support_x)
+                    - 90.0 * data.qvel[0],
+                    -220.0,
+                    220.0,
+                )
+            )
+            force[1] = float(
+                np.clip(
+                    -240.0 * (data.qpos[1] - support_y)
+                    - 90.0 * data.qvel[1],
+                    -220.0,
+                    220.0,
+                )
+            )
+            apply_start_heading_restraint(force)
+
         while is_running():
             started = time.perf_counter()
             if args.keep_open_after_finish and race_finished.is_set():
@@ -389,7 +460,43 @@ def main() -> None:
                 continue
             with lock:
                 support_now = time.monotonic()
-                if support_now < support_deadline:
+                if support_active and args.startup_support_until_skill6:
+                    if (
+                        skill6_enabled.is_set()
+                        and support_release_started_at is None
+                    ):
+                        support_release_started_at = support_now
+                        print(
+                            "[policy] Skill 6 confirmed; fading vertical "
+                            "startup support before lane lock",
+                            flush=True,
+                        )
+                    if support_release_started_at is None:
+                        apply_full_start_support(1.0)
+                    else:
+                        fade_seconds = max(
+                            args.startup_support_fade_seconds, 1e-6
+                        )
+                        elapsed = support_now - support_release_started_at
+                        support_scale = float(
+                            np.clip(1.0 - elapsed / fade_seconds, 0.0, 1.0)
+                        )
+                        if support_scale > 0.0:
+                            apply_full_start_support(support_scale)
+                        elif not lane_lock_acquired.is_set():
+                            # The vertical tether is now gone. Keep only the
+                            # X/Y/yaw starting-block restraint while the real
+                            # running-policy camera pose settles.
+                            apply_start_block_restraint()
+                        else:
+                            data.xfrc_applied[support_body_id] = 0.0
+                            support_active = False
+                            print(
+                                "[policy] startup restraint released after "
+                                "Skill 6 lane lock",
+                                flush=True,
+                            )
+                elif support_active and support_now < support_deadline:
                     # A virtual overhead safety tether: compensate weight,
                     # stabilize height, and damp horizontal drift. It applies
                     # no joint torque and is removed after FixStand settles.
@@ -400,49 +507,14 @@ def main() -> None:
                     support_scale = float(
                         np.clip(remaining / fade_seconds, 0.0, 1.0)
                     )
-                    force = data.xfrc_applied[support_body_id]
-                    force[:] = 0.0
-                    force[0] = support_scale * float(
-                        np.clip(-90.0 * data.qvel[0], -180.0, 180.0)
-                    )
-                    force[1] = support_scale * float(
-                        np.clip(-90.0 * data.qvel[1], -180.0, 180.0)
-                    )
-                    force[2] = support_scale * float(
-                        np.clip(
-                            robot_mass * 9.81
-                            + 900.0 * (support_z - data.qpos[2])
-                            - 120.0 * data.qvel[2],
-                            0.0,
-                            robot_mass * 9.81 * 2.0,
-                        )
-                    )
-                    apply_start_heading_restraint(force)
+                    apply_full_start_support(support_scale)
                 elif support_active and not lane_lock_acquired.is_set():
                     # The running policy drifts slightly even for a zero
                     # velocity command. Keep only an X/Y starting-block
                     # restraint after the vertical tether has faded out. It
                     # is released as soon as the final-height camera locks the
                     # two target-lane boundaries.
-                    force = data.xfrc_applied[support_body_id]
-                    force[:] = 0.0
-                    force[0] = float(
-                        np.clip(
-                            -240.0 * (data.qpos[0] - support_x)
-                            - 90.0 * data.qvel[0],
-                            -220.0,
-                            220.0,
-                        )
-                    )
-                    force[1] = float(
-                        np.clip(
-                            -240.0 * (data.qpos[1] - support_y)
-                            - 90.0 * data.qvel[1],
-                            -220.0,
-                            220.0,
-                        )
-                    )
-                    apply_start_heading_restraint(force)
+                    apply_start_block_restraint()
                 elif support_active:
                     data.xfrc_applied[support_body_id] = 0.0
                     support_active = False
@@ -544,6 +616,7 @@ def main() -> None:
         next_snapshot = time.monotonic()
         next_debug = time.monotonic()
         vision_enabled = False
+        skill6_ready_at: float | None = None
         saved_lock_debug = False
         saved_first_loss_debug = False
         last_depth_m = None
@@ -588,11 +661,40 @@ def main() -> None:
                 )
                 depth_m = last_depth_m
                 now = time.monotonic()
+                status_enabled = status_receiver.poll()
+                if status_enabled and not skill6_enabled.is_set():
+                    skill6_enabled.set()
+                    skill6_ready_at = now + max(
+                        0.0, args.skill6_stabilize_seconds
+                    )
+                    print(
+                        "[skill6] C++ FSM confirmed visual sprint mode; "
+                        "waiting for final-height lane lock",
+                        flush=True,
+                    )
+                elif (
+                    not status_enabled
+                    and skill6_enabled.is_set()
+                    and not vision_enabled
+                ):
+                    skill6_enabled.clear()
+                    skill6_ready_at = None
                 if race_finished.is_set():
                     command = ControllerCommand(
                         0.0, 0.0, 0.0, "FINISHED_WINDOW_HELD", False
                     )
-                elif now < vision_enable_deadline:
+                elif not skill6_enabled.is_set():
+                    command = ControllerCommand(
+                        0.0,
+                        0.0,
+                        0.0,
+                        "WAIT_FOR_SKILL6",
+                        result.valid,
+                    )
+                elif now < max(
+                    vision_enable_deadline,
+                    skill6_ready_at if skill6_ready_at is not None else now,
+                ):
                     command = ControllerCommand(
                         0.0,
                         0.0,
@@ -901,6 +1003,7 @@ def main() -> None:
     finally:
         stop.set()
         sender.close()
+        status_receiver.close()
         if viewer is not None:
             viewer.close()
         for thread in threads:

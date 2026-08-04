@@ -38,6 +38,7 @@ else:
 RUN_SCRIPT_PATH = VISION_ROOT / "scripts/run_vm_full_demo.sh"
 START_SCRIPT_PATH = VISION_ROOT / "scripts/start_vm_gui.sh"
 ENV_SCRIPT_PATH = VISION_ROOT / "scripts/activate_g1race_dds.sh"
+SIM_SCRIPT_PATH = VISION_ROOT / "scripts/run_unitree_camera_sim.py"
 
 
 class Skill6TransitionTests(unittest.TestCase):
@@ -88,6 +89,21 @@ class Skill6TransitionTests(unittest.TestCase):
         self.assertIn(
             '${HOME}/g1_race_vision/scripts/run_vm_full_demo.sh', source
         )
+
+    def test_startup_support_waits_for_actual_skill6(self) -> None:
+        simulator_source = SIM_SCRIPT_PATH.read_text(encoding="utf-8")
+        run_source = RUN_SCRIPT_PATH.read_text(encoding="utf-8")
+        command_source = VISION_COMMAND_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("UdpSkill6StatusReceiver", simulator_source)
+        self.assertIn('"WAIT_FOR_SKILL6"', simulator_source)
+        self.assertIn("skill6_enabled.is_set()", simulator_source)
+        self.assertIn("lane_lock_acquired.is_set()", simulator_source)
+        self.assertIn("--startup-support-until-skill6", run_source)
+        self.assertIn("G1_SKILL6_STABILIZE_SECONDS:-5.0", run_source)
+        self.assertIn("G1_VISION_STATUS_PORT", run_source)
+        self.assertIn("G1_VISION_SPRINT 1", command_source)
+        self.assertIn("G1_VISION_STATUS_PORT", command_source)
 
 
 if __name__ == "__main__":

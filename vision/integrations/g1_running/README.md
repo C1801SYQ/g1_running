@@ -27,6 +27,9 @@ license: Apache-2.0
 - `g1_running_skill6.patch`：注册视觉百米冲刺 Skill 6。它只允许从状态 1
   `RLFSMStateRLRoboMimicLocomotion` 按 `6` 进入；Passive、GetUp、
   GetDown 和 Skill 5 中的 `6` 均不会触发自动起立或冲刺。
+- Skill 6 真正进入/退出时，C++ 通过本机 UDP 端口 `15002` 通知 MuJoCo；
+  仿真安全支撑据此等待操作员完成 `0 → 1 → 6`，随后先卸载垂直支撑，
+  等真实相机姿态稳定并锁定双线后才完全释放。
 - 收到第一个视觉包后，如果超过 300 ms 没有新包，输出速度自动归零。
 - `speed_turn` 训练时横向速度范围为零，因此这里强制 `vy=0`，通过 `wz`
   转向纠偏。

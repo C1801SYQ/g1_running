@@ -15,6 +15,7 @@ fi
 RUNNING_REPOSITORY="${G1_RUNNING_ROOT:-${DEFAULT_RUNNING_REPOSITORY}}"
 RUNNING_ROOT="${RUNNING_REPOSITORY}/rl_sar"
 RUNNING_BINARY="${RUNNING_ROOT}/cmake_build/bin/rl_real_g1"
+STATUS_PORT="${G1_VISION_STATUS_PORT:-15002}"
 
 if [[ ! -x "${RUNNING_BINARY}" ]]; then
     echo "找不到已经编译的 g1_running 控制器：${RUNNING_BINARY}"
@@ -76,6 +77,8 @@ python scripts/run_unitree_camera_sim.py \
     --scene "${MUJOCO_ROOT}/unitree_robots/g1/scene_race_29dof.xml" \
     --domain-id "${G1_RACE_DOMAIN_ID}" \
     --interface "${G1_RACE_INTERFACE}" \
+    --status-port "${STATUS_PORT}" \
+    --skill6-stabilize-seconds "${G1_SKILL6_STABILIZE_SECONDS:-5.0}" \
     --camera-fps 30 \
     --depth-fps 10 \
     --viewer-fps 24 \
@@ -91,6 +94,7 @@ python scripts/run_unitree_camera_sim.py \
     --keep-open-after-finish \
     --startup-support-seconds 16.0 \
     --startup-support-fade-seconds 3.0 \
+    --startup-support-until-skill6 \
     --fall-height 0.45 \
     --fall-confirm-seconds 0.60 &
 sim_pid=$!
@@ -117,4 +121,5 @@ echo
 echo "启动 C1801SYQ/g1_running 的 rl_sar 29 自由度控制器……"
 cd "${RUNNING_ROOT}"
 G1_VISION_MAX_VX="${G1_VISION_MAX_VX:-5.10}" \
+G1_VISION_STATUS_PORT="${STATUS_PORT}" \
     "${RUNNING_BINARY}" "${G1_RACE_INTERFACE}"
