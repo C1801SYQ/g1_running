@@ -14,8 +14,15 @@ class LaneDetectorConfig:
     roi_top_ratio: float = 0.38
     lookahead_ratio: float = 0.22
     white_value_min: int = 175
-    white_saturation_max: int = 75
-    morphology_kernel: int = 5
+    white_saturation_max: int = 100
+    adaptive_value_floor: int = 55
+    adaptive_value_margin: int = 18
+    adaptive_value_smoothing: float = 0.35
+    max_neutral_chroma: int = 72
+    local_contrast_min: int = 14
+    local_contrast_kernel: int = 41
+    morphology_kernel: int = 3
+    vertical_close_kernel: int = 9
     min_component_area: float = 90.0
     min_vertical_span_ratio: float = 0.22
     min_lane_width_ratio: float = 0.20
@@ -30,9 +37,13 @@ class LaneDetectorConfig:
     initial_center_weight: float = 0.80
     temporal_pair_weight: float = 3.00
     max_boundary_step_ratio: float = 0.18
+    max_common_shift_ratio: float = 0.24
     max_lane_width_change_ratio: float = 0.25
     max_pair_center_offset_ratio: float = 0.48
     lock_update_alpha: float = 0.12
+    guided_search_margin_ratio: float = 0.075
+    guided_min_pixels: int = 70
+    guided_min_vertical_span_ratio: float = 0.18
 
 
 @dataclass(frozen=True)
@@ -62,6 +73,7 @@ class DetectionResult:
     lookahead_y: int = 0
     image_width: int = 0
     image_height: int = 0
+    value_threshold: float = 0.0
     mask: Optional[np.ndarray] = None
 
 
@@ -71,6 +83,7 @@ class WhiteLaneDetector:
     def __init__(self, config: LaneDetectorConfig | None = None):
         self.config = config or LaneDetectorConfig()
         self._locked_pair_geometry: Optional[np.ndarray] = None
+        self._adaptive_value_threshold: Optional[float] = None
 
     def reset(self) -> None:
         """Forget the selected lane so the next valid pair becomes the target."""
@@ -98,15 +111,7 @@ class WhiteLaneDetector:
         bottom_y = roi_y + int(round(roi_height * 0.62))
         bottom_y = int(np.clip(bottom_y, lookahead_y + 1, height - 1))
 
-        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
-        saturation = hsv[:, :, 1]
-        value = hsv[:, :, 2]
-        mask = np.zeros((height, width), dtype=np.uint8)
-        white = (
-            (value >= self.config.white_value_min)
-            & (saturation <= self.config.white_saturation_max)
-        )
-        white[:roi_y, :] = False
+        mask, value_threshold = self._build_white_mask(rgb, roi_y)
 
         if depth_m is not None:
             finite = np.isfinite(depth_m)
@@ -115,20 +120,42 @@ class WhiteLaneDetector:
                 (depth_m < self.config.min_depth_m)
                 | (depth_m > self.config.max_depth_m)
             )
-            white[outside] = False
+            mask[outside] = 0
             if not self.config.keep_invalid_depth:
-                white[~measured] = False
+                mask[~measured] = 0
 
-        mask[white] = 255
         kernel_size = max(3, int(self.config.morphology_kernel) | 1)
-        kernel = cv2.getStructuringElement(
+        open_kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
         )
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        close_height = max(kernel_size, int(self.config.vertical_close_kernel) | 1)
+        close_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (kernel_size, close_height)
+        )
+        # Closing first reconnects white-line fragments produced by motion blur
+        # and exposure flicker.  The smaller opening then removes isolated
+        # highlights without erasing a distant, narrow boundary.
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel)
 
         candidates = self._extract_candidates(mask, roi_y, roi_height)
         pair = self._choose_pair(candidates, width, lookahead_y, bottom_y)
+        pair_source = "two-lines"
+        if pair is None:
+            # A fast gait can split each physical boundary into several short
+            # contours.  Search around the already locked geometry and refit
+            # both boundaries from actual mask pixels.  This is still strict
+            # two-line observation; no missing boundary is synthesized.
+            pair = self._guided_pair_from_mask(
+                mask,
+                width,
+                roi_y,
+                roi_height,
+                lookahead_y,
+                bottom_y,
+            )
+            if pair is not None:
+                pair_source = "two-lines-guided"
 
         if pair is not None:
             left, right = pair
@@ -141,6 +168,8 @@ class WhiteLaneDetector:
                 lookahead_y,
                 bottom_y,
                 mask,
+                value_threshold,
+                pair_source,
             )
             if (
                 abs(result.heading_error_rad)
@@ -153,6 +182,7 @@ class WhiteLaneDetector:
                     lookahead_y=lookahead_y,
                     image_width=width,
                     image_height=height,
+                    value_threshold=value_threshold,
                     mask=mask,
                 )
             self._remember_pair(left, right, width, lookahead_y, bottom_y)
@@ -165,8 +195,80 @@ class WhiteLaneDetector:
             lookahead_y=lookahead_y,
             image_width=width,
             image_height=height,
+            value_threshold=value_threshold,
             mask=mask,
         )
+
+    def _build_white_mask(
+        self, rgb: np.ndarray, roi_y: int
+    ) -> tuple[np.ndarray, float]:
+        """Segment neutral bright paint under changing exposure and shadows."""
+
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+        saturation = hsv[:, :, 1]
+        value = hsv[:, :, 2]
+        roi_value = value[roi_y:, :]
+
+        if roi_value.size:
+            otsu_threshold, _ = cv2.threshold(
+                roi_value,
+                0,
+                255,
+                cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+            )
+            raw_threshold = float(
+                np.clip(
+                    otsu_threshold + self.config.adaptive_value_margin,
+                    self.config.adaptive_value_floor,
+                    self.config.white_value_min,
+                )
+            )
+        else:
+            raw_threshold = float(self.config.white_value_min)
+
+        if self._adaptive_value_threshold is None:
+            self._adaptive_value_threshold = raw_threshold
+        else:
+            configured_alpha = float(
+                np.clip(self.config.adaptive_value_smoothing, 0.0, 1.0)
+            )
+            # Adapt quickly when entering a shadow, but raise the threshold
+            # more slowly so one bright frame cannot make the next frame fail.
+            alpha = (
+                max(configured_alpha, 0.70)
+                if raw_threshold < self._adaptive_value_threshold
+                else configured_alpha
+            )
+            self._adaptive_value_threshold += alpha * (
+                raw_threshold - self._adaptive_value_threshold
+            )
+        value_threshold = float(self._adaptive_value_threshold)
+
+        rgb_i16 = rgb.astype(np.int16)
+        chroma = rgb_i16.max(axis=2) - rgb_i16.min(axis=2)
+        neutral = (
+            (saturation <= self.config.white_saturation_max)
+            & (chroma <= self.config.max_neutral_chroma)
+        )
+
+        kernel_size = max(9, int(self.config.local_contrast_kernel) | 1)
+        contrast_kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT, (kernel_size, kernel_size)
+        )
+        local_contrast = cv2.morphologyEx(
+            value, cv2.MORPH_TOPHAT, contrast_kernel
+        )
+        absolute_white = value >= value_threshold
+        locally_bright = (
+            (value >= self.config.adaptive_value_floor)
+            & (local_contrast >= self.config.local_contrast_min)
+        )
+        white = neutral & (absolute_white | locally_bright)
+        white[:roi_y, :] = False
+
+        mask = np.zeros(value.shape, dtype=np.uint8)
+        mask[white] = 255
+        return mask, value_threshold
 
     def _extract_candidates(
         self, mask: np.ndarray, roi_y: int, roi_height: int
@@ -189,19 +291,15 @@ class WhiteLaneDetector:
             if span < min_span:
                 continue
 
-            y = points[:, 1]
-            x = points[:, 0]
-            slope, intercept = np.polyfit(y, x, 1)
-            residual = x - (slope * y + intercept)
-            rms = float(np.sqrt(np.mean(residual * residual)))
-            span_score = float(np.clip(span / roi_height, 0.0, 1.0))
+            fitted = self._fit_line(points, roi_height, y_min, y_max)
+            if fitted is None:
+                continue
             area_score = float(np.clip(area / (roi_height * 18.0), 0.0, 1.0))
-            straightness = float(np.exp(-rms / 35.0))
-            score = 0.50 * span_score + 0.30 * area_score + 0.20 * straightness
+            score = 0.75 * fitted.score + 0.25 * area_score
             candidates.append(
                 LineModel(
-                    slope=float(slope),
-                    intercept=float(intercept),
+                    slope=fitted.slope,
+                    intercept=fitted.intercept,
                     score=score,
                     y_min=y_min,
                     y_max=y_max,
@@ -264,21 +362,30 @@ class WhiteLaneDetector:
                     # positions do not, so they must not be a hard identity
                     # gate. Switching to an adjacent lane still replaces one
                     # near boundary and produces roughly a full-lane jump.
-                    boundary_step = float(
-                        np.max(np.abs(geometry[:2] - previous[:2]))
+                    near_delta = geometry[:2] - previous[:2]
+                    common_shift = float(abs(np.mean(near_delta)))
+                    deformation = float(
+                        np.max(np.abs(near_delta - np.mean(near_delta)))
                     )
                     previous_width = previous[1] - previous[0]
                     width_change = abs(
                         (geometry[1] - geometry[0]) - previous_width
                     )
-                    if boundary_step > self.config.max_boundary_step_ratio:
+                    # Roll/yaw shake moves both boundaries together.  Treat
+                    # that common image translation separately from a shape
+                    # change, while retaining a tighter absolute limit that
+                    # rejects a complete jump into the neighbouring lane.
+                    if deformation > self.config.max_boundary_step_ratio:
+                        continue
+                    if common_shift > self.config.max_common_shift_ratio:
                         continue
                     if width_change > (
                         self.config.max_lane_width_change_ratio
                         * max(previous_width, 1e-6)
                     ):
                         continue
-                    temporal_match = float(np.exp(-boundary_step / 0.10))
+                    temporal_distance = max(deformation, 0.65 * common_shift)
+                    temporal_match = float(np.exp(-temporal_distance / 0.10))
 
                 score = (
                     left.score
@@ -291,6 +398,97 @@ class WhiteLaneDetector:
                     best_score = score
                     best = (left, right)
         return best
+
+    def _guided_pair_from_mask(
+        self,
+        mask: np.ndarray,
+        width: int,
+        roi_y: int,
+        roi_height: int,
+        lookahead_y: int,
+        bottom_y: int,
+    ) -> Optional[tuple[LineModel, LineModel]]:
+        """Refit two observed fragmented boundaries near the locked lane."""
+
+        if self._locked_pair_geometry is None:
+            return None
+
+        y_pixels, x_pixels = np.nonzero(mask[roi_y:, :])
+        if y_pixels.size == 0:
+            return None
+        y_pixels = y_pixels.astype(np.float64) + roi_y
+        x_pixels = x_pixels.astype(np.float64)
+        geometry = self._locked_pair_geometry
+        margin = max(4.0, width * self.config.guided_search_margin_ratio)
+        min_span = roi_height * self.config.guided_min_vertical_span_ratio
+
+        fitted: list[LineModel] = []
+        for top_x_ratio, bottom_x_ratio in (
+            (geometry[2], geometry[0]),
+            (geometry[3], geometry[1]),
+        ):
+            slope = (
+                width * (bottom_x_ratio - top_x_ratio)
+                / max(float(bottom_y - lookahead_y), 1.0)
+            )
+            predicted_x = width * top_x_ratio + slope * (
+                y_pixels - lookahead_y
+            )
+            selected = np.abs(x_pixels - predicted_x) <= margin
+            if int(np.count_nonzero(selected)) < self.config.guided_min_pixels:
+                return None
+
+            points = np.column_stack((x_pixels[selected], y_pixels[selected]))
+            y_min = float(points[:, 1].min())
+            y_max = float(points[:, 1].max())
+            if y_max - y_min < min_span:
+                return None
+
+            line = self._fit_line(points, roi_height, y_min, y_max)
+            if line is None:
+                return None
+            fitted.append(line)
+
+        return self._choose_pair(fitted, width, lookahead_y, bottom_y)
+
+    @staticmethod
+    def _fit_line(
+        points: np.ndarray,
+        roi_height: int,
+        y_min: float,
+        y_max: float,
+    ) -> Optional[LineModel]:
+        """Fit x(y) with a Huber loss so glare and blur tails have low weight."""
+
+        if len(points) < 2:
+            return None
+        vx, vy, x0, y0 = cv2.fitLine(
+            points.astype(np.float32).reshape(-1, 1, 2),
+            cv2.DIST_HUBER,
+            0,
+            0.01,
+            0.01,
+        ).reshape(-1)
+        if abs(float(vy)) < 1e-5:
+            return None
+        slope = float(vx / vy)
+        intercept = float(x0 - slope * y0)
+        residual = points[:, 0] - (slope * points[:, 1] + intercept)
+        median_error = float(np.median(np.abs(residual)))
+        span = y_max - y_min
+        span_score = float(np.clip(span / max(roi_height, 1), 0.0, 1.0))
+        support_score = float(
+            np.clip(len(points) / max(roi_height * 10.0, 1.0), 0.0, 1.0)
+        )
+        straightness = float(np.exp(-median_error / 18.0))
+        score = 0.50 * span_score + 0.30 * support_score + 0.20 * straightness
+        return LineModel(
+            slope=slope,
+            intercept=intercept,
+            score=score,
+            y_min=y_min,
+            y_max=y_max,
+        )
 
     @staticmethod
     def _pair_geometry(
@@ -341,6 +539,8 @@ class WhiteLaneDetector:
         lookahead_y: int,
         bottom_y: int,
         mask: np.ndarray,
+        value_threshold: float,
+        source: str,
     ) -> DetectionResult:
         left_bottom = left.x_at(bottom_y)
         right_bottom = right.x_at(bottom_y)
@@ -371,13 +571,14 @@ class WhiteLaneDetector:
             lateral_error=float(np.clip(lateral_error, -2.0, 2.0)),
             heading_error_rad=float(heading_error),
             confidence=confidence,
-            source="two-lines",
+            source=source,
             left_line=left,
             right_line=right,
             roi_y=roi_y,
             lookahead_y=lookahead_y,
             image_width=width,
             image_height=height,
+            value_threshold=value_threshold,
             mask=mask,
         )
 
@@ -464,7 +665,7 @@ class WhiteLaneDetector:
 
         status = (
             f"{'VALID' if result.valid else 'LOST'} {result.source} "
-            f"conf={result.confidence:.2f}"
+            f"conf={result.confidence:.2f} V>={result.value_threshold:.0f}"
         )
         errors = (
             f"offset={result.lateral_error:+.3f} "

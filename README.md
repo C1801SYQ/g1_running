@@ -231,7 +231,8 @@ P / LB_X      → 被动模式（急停）
 
 `vision/` 目录来自 [MS-handsome6](https://github.com/MS-handsome6) 贡献：
 - 视觉闭环百米冲刺系统
-- 机载相机识别跑道白线 + G1 IMU 航向纠偏
+- 机载相机严格识别两条跑道白线 + G1 IMU 航向纠偏
+- 自适应光照、运动模糊/断线恢复、相机共同抖动补偿和 Huber 鲁棒拟合
 - MuJoCo 仿真验证完成
 
 Skill 6 复用原有 `running` policy，不替换 Skill 5。控制器必须按

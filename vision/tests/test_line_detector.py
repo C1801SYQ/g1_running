@@ -20,6 +20,11 @@ def synthetic_lane(shift_px: int = 0, width: int = 640, height: int = 480) -> np
     return image
 
 
+def horizontal_motion_blur(image: np.ndarray, width: int = 25) -> np.ndarray:
+    kernel = np.full((1, width), 1.0 / width, dtype=np.float32)
+    return cv2.filter2D(image, -1, kernel)
+
+
 class WhiteLaneDetectorTest(unittest.TestCase):
     def test_centered_lane(self):
         result = WhiteLaneDetector().detect(synthetic_lane())
@@ -53,6 +58,71 @@ class WhiteLaneDetectorTest(unittest.TestCase):
         image = np.zeros((480, 640, 3), dtype=np.uint8)
         result = WhiteLaneDetector().detect(image)
         self.assertFalse(result.valid)
+
+    def test_low_light_and_color_cast_remain_detectable(self):
+        image = synthetic_lane().astype(np.float32)
+        dim_warm = np.clip(
+            image * np.asarray([0.42, 0.34, 0.30], dtype=np.float32),
+            0,
+            255,
+        ).astype(np.uint8)
+
+        result = WhiteLaneDetector().detect(dim_warm)
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.source, "two-lines")
+        self.assertLess(result.value_threshold, 100.0)
+
+    def test_abrupt_shadow_after_bright_frame_does_not_drop_pair(self):
+        detector = WhiteLaneDetector()
+        self.assertTrue(detector.detect(synthetic_lane()).valid)
+        shadow = np.clip(
+            synthetic_lane().astype(np.float32) * 0.28, 0, 255
+        ).astype(np.uint8)
+
+        result = detector.detect(shadow)
+
+        self.assertTrue(result.valid)
+        self.assertLess(abs(result.lateral_error), 0.04)
+
+    def test_horizontal_motion_blur_remains_detectable(self):
+        result = WhiteLaneDetector().detect(
+            horizontal_motion_blur(synthetic_lane())
+        )
+
+        self.assertTrue(result.valid)
+        self.assertLess(abs(result.lateral_error), 0.05)
+
+    def test_locked_pair_survives_large_common_camera_shake(self):
+        detector = WhiteLaneDetector()
+        self.assertTrue(detector.detect(synthetic_lane()).valid)
+
+        right = detector.detect(synthetic_lane(shift_px=110))
+        left = detector.detect(synthetic_lane(shift_px=-110))
+        recovered = detector.detect(synthetic_lane())
+
+        self.assertTrue(right.valid)
+        self.assertTrue(left.valid)
+        self.assertTrue(recovered.valid)
+        self.assertGreater(right.lateral_error, 0.25)
+        self.assertLess(left.lateral_error, -0.25)
+
+    def test_fragmented_locked_boundaries_are_refit_from_real_pixels(self):
+        detector = WhiteLaneDetector()
+        image = synthetic_lane()
+        self.assertTrue(detector.detect(image).valid)
+        fragmented = image.copy()
+        fragmented[225:260, :] = (85, 28, 28)
+        fragmented[300:335, :] = (85, 28, 28)
+        fragmented[375:410, :] = (85, 28, 28)
+        fragmented[450:, :] = (85, 28, 28)
+
+        result = detector.detect(fragmented)
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.source, "two-lines-guided")
+        self.assertIsNotNone(result.left_line)
+        self.assertIsNotNone(result.right_line)
 
     def test_impossible_heading_pair_is_rejected(self):
         detector = WhiteLaneDetector(
