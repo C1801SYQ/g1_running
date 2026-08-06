@@ -88,7 +88,7 @@
 
 | 改动 | 内容 |
 |------|------|
-| standing 轨迹 | 轨迹库加入官方 standing 轨迹（0 m/s），解决低速/站姿低头导致相机看不到白线 |
+| standing 轨迹 | 轨迹库加入官方 standing 轨迹（0 m/s），解决低速/站姿低头导致相机看不到白线（出现后仰bug） |
 | `pelvis_upright_reward` (4.0) | 骨盆 roll/pitch 保持直立，相机前视 |
 | `pelvis_height_reward` (3.0) | 骨盆保持 0.65m 高度，防止下蹲看地 |
 | `low_speed_upright_reward` (3.0) | 低速/静止时强制直立姿态 |
