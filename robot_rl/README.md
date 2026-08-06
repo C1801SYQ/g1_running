@@ -130,6 +130,77 @@ If either of these are unspecified then we plot the data for the newest run.
 To add a new robot, the associated robot sim files will need to be added into the `transfer/sim/robots/` folder,
 the `rl_policy_wrapper` will need to be adjusted a bit, and a new `runner` file will need to be made.
 
+## Measuring policy speed in MuJoCo
+
+A reliable way to measure the actual forward speed of a trained running policy in
+MuJoCo (pure policy performance, no rl_sar / keyboard needed). Verified: it
+produces an accurate steady-state forward speed (e.g. model_89996 → ~5.0 m/s).
+
+**Prerequisites** — export the policy first:
+
+```bash
+/home/ubuntu/IsaacLab/isaaclab.sh -p scripts/rsl_rl/play_policy.py \
+    --env_type=running_clf_29dof --num_envs=1 --export_policy --headless \
+    --load_run=<RUN_DIR> --checkpoint=model_<ITER> --logger tensorboard
+```
+
+**Important** — the exported `policy_parameters.yaml` may carry
+`v_x_max: 3.0` / `v_x_min: 3.0` (a play-config artifact). This caps the
+commanded speed at 3.0 m/s and makes every command measure ~3.06 m/s. Fix it
+before measuring:
+
+```bash
+sed -i 's/^v_x_max: .*/v_x_max: 5.1/; s/^v_x_min: .*/v_x_min: 0.0/' \
+    logs/g1_policies/<env>/<run>/exported/policy_parameters.yaml
+```
+
+**Measure** (in `robot_rl`, env `env_isaaclab`):
+
+```bash
+source ~/anaconda3/etc/profile.d/conda.sh && conda activate env_isaaclab
+export PYTHONPATH=/home/ubuntu/robot_rl/transfer:$PYTHONPATH
+python3 -c "
+import numpy as np, os
+os.chdir('/home/ubuntu/robot_rl')
+from transfer.sim.rl_policy import RLPolicy
+from transfer.sim.robot import Robot
+param = '<RUN_DIR>/exported/policy_parameters.yaml'
+model = '<RUN_DIR>/exported/policy.pt'
+for cmd in [0.0, 3.0, 5.0]:
+    p = RLPolicy(param, model); p.load()
+    r = Robot('g1_21j', '29dof_basic_scene', np.array([1,1,1]),
+              input_function=lambda t, c=cmd: np.array([c, 0.0, 0.0]),
+              gains={'kp_y':1.5,'kd_y':0.3,'kp_yaw':0.8,'kd_yaw':0.3})
+    r.set_pd_gains_from_policy(p)
+    for _ in range(50):
+        obs = r.create_observation(p); r.apply_action(p.get_action(obs, r.joint_names))
+        for _ in range(10): r.step()
+    x0 = float(r.mj_data.qpos[0]); t0 = r.mj_data.time
+    for _ in range(200):
+        obs = r.create_observation(p); r.apply_action(p.get_action(obs, r.joint_names))
+        for _ in range(10): r.step()
+        if r.failed(): break
+    x1 = float(r.mj_data.qpos[0]); t1 = r.mj_data.time
+    spd = (x1-x0)/(t1-t0) if t1>t0 else 0
+    print(f'cmd={cmd:.1f} -> {spd:.2f}m/s')
+"
+```
+
+**Why this method is accurate** (gotchas we hit):
+1. Use `29dof_basic_scene`, **not** `29dof_scene` — the basic scene sets up the
+   PD gains correctly.
+2. **Must** call `r.set_pd_gains_from_policy(p)` so kp/kd match the policy.
+3. Fix `v_x_max` in the exported `policy_parameters.yaml` (play config sets it to
+   3.0, which caps commanded speed).
+4. Measure from the **world qpos displacement** (not the sim log's local-velocity
+   columns, whose axis mapping is unreliable).
+5. Command speed is given directly in m/s (RLPolicy already applies
+   `commands_scale` internally).
+
+Validation: at cmd=5.0 the pelvis height is ~0.64 m (running posture, not
+standing ~1.0 m), the speed ramps to ~5.0 m/s within ~1.5 s and stays steady
+(±0.1 m/s), and the robot does not fall.
+
 ## Code formatting
 
 We have a pre-commit template to automatically format your code.
