@@ -443,6 +443,167 @@ def joint_pos_default_reward(
     return torch.sum(err, dim=1) / std**2
 
 
+def upper_body_stability_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    joint_vel_std: float = 2.0,
+    joint_acc_std: float = 4.0,
+) -> torch.Tensor:
+    """Penalize upper-body joint velocities/accelerations to keep the camera steady.
+
+    Applies exponential penalty on the squared angular velocity and acceleration
+    of the shoulder, elbow, and wrist joints. This reduces arm flailing that would
+    shake the onboard vision camera during running.
+
+    Args:
+        env: The environment instance.
+        asset_cfg: Configuration for the articulation asset and joint selection
+            (should point at the upper-body joints).
+        joint_vel_std: Std for the velocity penalty kernel.
+        joint_acc_std: Std for the acceleration penalty kernel.
+
+    Returns:
+        A tensor of shape (num_envs,) with the stability reward contribution.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
+    joint_acc = asset.data.joint_acc[:, asset_cfg.joint_ids]
+    vel_penalty = torch.exp(-torch.sum(joint_vel**2, dim=1) / joint_vel_std**2)
+    acc_penalty = torch.exp(-torch.sum(joint_acc**2, dim=1) / joint_acc_std**2)
+    return vel_penalty * acc_penalty
+
+
+def pelvis_upright_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="pelvis_link"),
+    roll_std: float = 0.15,
+    pitch_std: float = 0.15,
+) -> torch.Tensor:
+    """Reward keeping the pelvis upright (roll/pitch near zero).
+
+    Low-speed/standing gaits tend to lean the torso forward, which pitches the
+    onboard camera away from the white lines. This reward penalizes pelvic
+    roll/pitch deviation from upright.
+
+    Args:
+        env: The environment instance.
+        asset_cfg: Configuration for the articulation asset and pelvis body.
+        roll_std: Std for the Gaussian roll penalty kernel.
+        pitch_std: Std for the Gaussian pitch penalty kernel.
+
+    Returns:
+        A tensor of shape (num_envs,) with the upright reward contribution.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    quat = asset.data.body_link_quat_w[:, asset_cfg.body_ids]
+    w, x, y, z = (quat[:, 0, 0], quat[:, 0, 1], quat[:, 0, 2], quat[:, 0, 3])
+    roll = torch.atan2(
+        2.0 * (w * x + y * z),
+        1.0 - 2.0 * (x**2 + y**2),
+    )
+    pitch = torch.atan2(
+        2.0 * (w * y - z * x),
+        1.0 - 2.0 * (y**2 + z**2),
+    )
+    roll_reward = torch.exp(-roll**2 / roll_std**2)
+    pitch_reward = torch.exp(-pitch**2 / pitch_std**2)
+    return roll_reward * pitch_reward
+
+
+def pelvis_height_reward(
+    env: ManagerBasedRLEnv,
+    target_height: float = 0.65,
+    std: float = 0.08,
+) -> torch.Tensor:
+    """Reward keeping the pelvis height near a nominal running height.
+
+    A collapsed (crouched) torso makes the camera look at the ground instead of
+    the white lines. This reward keeps the pelvis at a healthy height so the
+    camera has a forward field of view.
+
+    Args:
+        env: The environment instance.
+        target_height: Desired pelvis height above ground in meters.
+        std: Std for the Gaussian height penalty kernel.
+
+    Returns:
+        A tensor of shape (num_envs,) with the height reward contribution.
+    """
+    height = env.scene["robot"].data.root_pos_w[:, 2]
+    return torch.exp(-(height - target_height) ** 2 / std**2)
+
+
+def upper_body_velocity_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    joint_vel_std: float = 2.0,
+    joint_acc_std: float = 4.0,
+) -> torch.Tensor:
+    """Penalize upper-body joint velocities/accelerations to keep the camera steady.
+
+    This is a linear penalty (squared L2) form of ``upper_body_stability_reward``
+    that does not saturate, so it pushes the policy harder to keep the torso,
+    shoulders, and elbows calm. Includes the waist joints for camera steadiness.
+
+    Args:
+        env: The environment instance.
+        asset_cfg: Configuration for the articulation asset and joint selection.
+        joint_vel_std: Std for the velocity penalty kernel.
+        joint_acc_std: Std for the acceleration penalty kernel.
+
+    Returns:
+        A tensor of shape (num_envs,) with the stability penalty.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
+    joint_acc = asset.data.joint_acc[:, asset_cfg.joint_ids]
+    vel_penalty = torch.sum(joint_vel**2, dim=1) / joint_vel_std**2
+    acc_penalty = torch.sum(joint_acc**2, dim=1) / joint_acc_std**2
+    return vel_penalty + acc_penalty
+
+
+def low_speed_upright_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    speed_threshold: float = 0.5,
+    body_names: str = "pelvis_link",
+    roll_std: float = 0.15,
+    pitch_std: float = 0.15,
+) -> torch.Tensor:
+    """Reward upright posture specifically when the commanded speed is low.
+
+    Combines a standing mask (|vx_cmd| < threshold) with the pelvis upright
+    reward so low-speed/standing gaits cannot trade posture for other terms.
+
+    Args:
+        env: The environment instance.
+        command_name: Name of the velocity command term.
+        speed_threshold: Commanded x-velocity below which posture is enforced.
+        body_names: Pelvis body name.
+        roll_std: Std for the Gaussian roll penalty kernel.
+        pitch_std: Std for the Gaussian pitch penalty kernel.
+
+    Returns:
+        A tensor of shape (num_envs,) with the low-speed upright reward.
+    """
+    cmd = env.command_manager.get_term(command_name)
+    vel_cmd_x = cmd.command[:, 0].abs()
+    standing_mask = (vel_cmd_x < speed_threshold).float()
+    asset: Articulation = env.scene["robot"]
+    body_id = asset.body_names.index(body_names)
+    quat = asset.data.body_link_quat_w[:, body_id]
+    roll = torch.atan2(
+        2.0 * (quat[:, 0] * quat[:, 1] + quat[:, 2] * quat[:, 3]),
+        1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2),
+    )
+    pitch = torch.atan2(
+        2.0 * (quat[:, 0] * quat[:, 2] - quat[:, 3] * quat[:, 1]),
+        1.0 - 2.0 * (quat[:, 2] ** 2 + quat[:, 3] ** 2),
+    )
+    reward = torch.exp(-roll**2 / roll_std**2) * torch.exp(-pitch**2 / pitch_std**2)
+    return 1.0 + standing_mask * (reward - 1.0)
+
+
 def torque_limits(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Penalize applied torques if they cross the limits.
 

@@ -94,7 +94,21 @@ class VelocityTrackingCommand(UniformVelocityCommand):
             r >= self.cfg.rel_closed_loop_yaw + self.cfg.rel_open_loop)
 
         # -- linear velocity - x direction
-        self.vel_target_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
+        # Segment the x-velocity distribution so every speed band (standing /
+        # low / mid / high) is sampled evenly. A single uniform range over the
+        # full 0..5.1 spread under-trains the low-speed standing gait and the
+        # top-speed band simultaneously.
+        vx_lo, vx_hi = self.cfg.ranges.lin_vel_x
+        segments = getattr(self.cfg, "lin_vel_x_segments", None)
+        if segments is not None:
+            seg_idx = torch.randint(0, len(segments), (len(env_ids),), device=self.device)
+            for i, (s_lo, s_hi) in enumerate(segments):
+                mask = seg_idx == i
+                if mask.any():
+                    n = int(mask.sum().item())
+                    self.vel_target_b[env_ids[mask], 0] = torch.rand(n, device=self.device) * (s_hi - s_lo) + s_lo
+        else:
+            self.vel_target_b[env_ids, 0] = r.uniform_(vx_lo, vx_hi)
         # -- linear velocity - y direction
         self.vel_target_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)
         # -- ang vel yaw - rotation around z

@@ -33,6 +33,14 @@ class VelocityTrackingCommandCfg(UniformVelocityCommandCfg):
 
     max_acc: float = 100.0
 
+    lin_vel_x_segments: tuple[tuple[float, float], ...] | None = None
+    """Optional equal-weight segments for sampling x-velocity.
+
+    When set, each segment gets the same sampling probability instead of a
+    uniform draw over the full lin_vel_x range. Use it to over-represent the
+    standing/low-speed band and the top-speed band during training.
+    """
+
     @configclass
     class VelRanges(UniformVelocityCommandCfg.Ranges):
         """Uniform distribution ranges for the velocity tracking command."""

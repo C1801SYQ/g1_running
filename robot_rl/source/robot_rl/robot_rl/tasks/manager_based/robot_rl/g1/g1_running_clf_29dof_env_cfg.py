@@ -217,10 +217,14 @@ class G1Running29dofObservationCfg(G1TrajOptObservationsCfg):
 
 
 if TRACKING_REW_TYPE == "GOAL_ADJ" or TRACKING_REW_TYPE == "GOAL":
-    CLF_WEIGHT = 1.0       # Minimal CLF - let speed tracking dominate
+    CLF_WEIGHT = 2.0       # Balanced: enough for arm tracking, speed still priority
 else:
     CLF_WEIGHT = 2.0
 EXTRA_JOINT_POS_WEIGHT = 5.0  # Penalize deviation from default for joints without trajectory refs
+UPPER_BODY_WEIGHT = 6.0       # Stronger camera steadiness (was 1.0)
+PELVIS_UPRIGHT_WEIGHT = 4.0   # Keep torso upright so the camera sees the white lines
+PELVIS_HEIGHT_WEIGHT = 3.0    # Keep pelvis at nominal running height (anti-crouch)
+LOW_SPEED_UPRIGHT_WEIGHT = 3.0  # Upright posture enforced at low speed / standing
 
 
 @configclass
@@ -251,11 +255,65 @@ class G1Running29dofRewardCfg(G1TrajOptCLFRewards):
         },
     )
 
+    # Keep upper-body (shoulder/elbow/waist) steady to reduce camera shake during
+    # vision running. Exponential (saturating 0..1) form keeps gradients stable
+    # when resuming from a pre-trained policy.
+    upper_body_stability = RewTerm(
+        func=mdp.upper_body_stability_reward,
+        weight=UPPER_BODY_WEIGHT,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[
+                "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+                ".*_shoulder_pitch_joint", ".*_shoulder_roll_joint", ".*_shoulder_yaw_joint",
+                ".*_elbow_joint",
+            ]),
+            "joint_vel_std": 2.0,
+            "joint_acc_std": 4.0,
+        },
+    )
+
+    # Keep the pelvis upright (roll/pitch ~0) so the camera points forward, not down.
+    pelvis_upright = RewTerm(
+        func=mdp.pelvis_upright_reward,
+        weight=PELVIS_UPRIGHT_WEIGHT,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="pelvis_link"),
+            "roll_std": 0.15,
+            "pitch_std": 0.15,
+        },
+    )
+
+    # Keep the pelvis at nominal running height so the camera is not staring at the ground.
+    pelvis_height = RewTerm(
+        func=mdp.pelvis_height_reward,
+        weight=PELVIS_HEIGHT_WEIGHT,
+        params={"target_height": 0.65, "std": 0.08},
+    )
+
+    # Force upright posture specifically at low speed / standing where the current
+    # gait bows the torso and loses the white lines.
+    low_speed_upright = RewTerm(
+        func=mdp.low_speed_upright_reward,
+        weight=LOW_SPEED_UPRIGHT_WEIGHT,
+        params={
+            "command_name": "base_velocity",
+            "speed_threshold": 0.5,
+            "body_names": "pelvis_link",
+            "roll_std": 0.15,
+            "pitch_std": 0.15,
+        },
+    )
+
     if TRACKING_REW_TYPE == "GOAL" or TRACKING_REW_TYPE == "GOAL_ADJ":
         xy_vel = RewTerm(func=mdp.track_lin_vel_xy_exp, weight=10.0,
                          params={"command_name": "base_velocity", "std": 0.5})
         yaw_vel = RewTerm(func=mdp.track_ang_vel_z_exp, weight=8.0,
                           params={"command_name": "base_velocity", "std": 0.5})
+        # Stronger lateral tracking so the robot resists drifting off the target
+        # line during vision lane-following. The base xy term still handles it,
+        # but an explicit y term avoids diluting the lateral objective.
+        lat_vel = RewTerm(func=mdp.track_lin_vel_y_exp, weight=3.0,
+                          params={"command_name": "base_velocity", "std": 0.4})
 
 
 @configclass
@@ -293,8 +351,8 @@ class G1Running29dofEventsCfg(HumanoidEventsCfg):
 
     add_base_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass, mode="startup",
-        params={"asset_cfg": SceneEntityCfg("robot", body_names="waist_yaw_link"),
-                "mass_distribution_params": (0.85, 1.15), "operation": "scale"},
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=["waist_yaw_link", "pelvis_link"]),
+                "mass_distribution_params": (0.75, 1.25), "operation": "scale"},
     )
 
     reset_base = None
@@ -322,10 +380,21 @@ class G1Running29dofGaitLibraryEnvCfg(HumanoidEnvCfg):
             self.commands.base_velocity.ranges.lin_vel_y = (-0.75, 0.75)
             self.commands.base_velocity.ranges.ang_vel_z = (-1.5, 1.5)    # Turning enabled
             self.commands.base_velocity.ranges.heading = (-3.14, 3.14)     # Full heading range
+            # Equal-weight segments so standing/low-speed, mid-speed and top-speed
+            # bands are all trained evenly instead of being diluted by a single
+            # uniform draw over 0..5.1.
+            self.commands.base_velocity.lin_vel_x_segments = (
+                (0.0, 1.0),     # standing / slow walk
+                (1.0, 2.5),     # slow run
+                (2.5, 4.0),     # mid run
+                (4.0, 4.7),     # fast run
+                (4.7, 5.1),     # top speed
+            )
         else:
             self.commands.base_velocity.ranges.lin_vel_x = (3.6, 3.6)
             self.commands.base_velocity.ranges.lin_vel_y = (0, 0)
             self.commands.base_velocity.ranges.ang_vel_z = (0, 0)
+            self.commands.base_velocity.lin_vel_x_segments = None
 
         # Small heading variation for yaw robustness (was (0,0))
         self.commands.base_velocity.ranges.heading = (-0.3, 0.3)
@@ -346,9 +415,22 @@ class G1Running29dofGaitLibraryEnvCfg(HumanoidEnvCfg):
 
         # Domain randomization
         self.events.base_external_force_torque = None
+        # Ground contact friction: wider range re-randomized on every episode
+        # reset so the policy is robust to different floor surfaces (friction
+        # coefficient) across environments.
+        self.events.randomize_ground_contact_friction.params['static_friction_range'] = (0.3, 2.0)
+        self.events.randomize_ground_contact_friction.params['dynamic_friction_range'] = (0.3, 1.6)
         self.events.randomize_ground_contact_friction.params['restitution_range'] = (0.0, 0.2)
-        self.events.push_robot.params['velocity_range'] = {"x": (-0.75, 0.75), "y": (-0.75, 0.75)}
-        self.events.base_com.params['asset_cfg'] = SceneEntityCfg("robot", body_names="waist_yaw_link")
+        self.events.randomize_ground_contact_friction.params['num_buckets'] = 64
+        self.events.randomize_ground_contact_friction.mode = "reset"
+        # Stronger lateral push to train straight-line recovery from lateral drifts
+        # (helps the vision lane-following when the robot veers off the target line).
+        self.events.push_robot.params['velocity_range'] = {"x": (-0.75, 0.75), "y": (-1.0, 1.0)}
+        # Larger COM offset on the torso to simulate a slight ground tilt / uneven
+        # load while still keeping the terrain flat (train straight running under
+        # an offset center of gravity).
+        self.events.base_com.params['asset_cfg'] = SceneEntityCfg("robot", body_names=["waist_yaw_link", "pelvis_link"])
+        self.events.base_com.params['com_range'] = {"x": (-0.08, 0.08), "y": (-0.10, 0.10), "z": (-0.02, 0.02)}
 
         self.episode_length_s = 20.0
 
