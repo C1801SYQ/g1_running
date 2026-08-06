@@ -8,7 +8,7 @@
 
 在 G1 21 自由度跑步策略基础上扩展为 **29 自由度**全身跑步，训练策略实现 0~5.1 m/s 变速跑步 + 转向，并通过 rl_sar 框架部署到 MuJoCo 仿真和实体机器人。
 
-**最终成果：** speed_turn 模型实现 4.94 m/s 实际极速，支持站立/变速/转向。
+**最终成果：** `steady_upper_v2` 模型实现高速跑步 + 视觉循迹，重点优化低速/站立姿态（骨盆直立、相机视角稳定）、上半身稳定（相机防抖）与鲁棒性（COM 偏移、摩擦随机化）。
 
 ---
 
@@ -38,6 +38,8 @@
 │   ├── transfer/obelisk/        # Obelisk 实体部署 (ROS2)
 │   ├── models/                  # 训练好的策略文件
 │   │   ├── speed_turn/          # ★ 最佳模型 (4.94 m/s)
+│   │   ├── speed_arm/           # 手臂摆动模型 (4.90 m/s)
+│   │   ├── steady_upper_v2/     # ★ 当前最佳 (89996 iter, 视觉循迹优化)
 │   │   └── standrun/            # 站立+跑步模型
 │   └── trajectories/running/    # 跑步步态轨迹库 (1.2~5.0 m/s)
 │
@@ -80,6 +82,22 @@
 | heading | 无 | **±3.14 + rel_heading_envs=0.2** | 20% 环境训练转向 |
 | ang_vel_z | ±0.75 | **±1.5** | 大角度转向 |
 
+### 2b. 视觉循迹优化 (steady_upper_v2)
+
+针对视觉百米冲刺的专项训练优化，核心目标是**相机稳定 + 低速直立 + 平地直线鲁棒**：
+
+| 改动 | 内容 |
+|------|------|
+| standing 轨迹 | 轨迹库加入官方 standing 轨迹（0 m/s），解决低速/站姿低头导致相机看不到白线 |
+| `pelvis_upright_reward` (4.0) | 骨盆 roll/pitch 保持直立，相机前视 |
+| `pelvis_height_reward` (3.0) | 骨盆保持 0.65m 高度，防止下蹲看地 |
+| `low_speed_upright_reward` (3.0) | 低速/静止时强制直立姿态 |
+| `upper_body_stability` (6.0) | 上肢（含腰部）速度/加速度惩罚，抑制相机抖动 |
+| `lat_vel` (3.0) | 横向速度跟踪强化，抗横漂（利于视觉循迹） |
+| 速度分段采样 | `lin_vel_x_segments` 均匀覆盖 0-1.0/1.0-2.5/2.5-4.0/4.0-4.7/4.7-5.1 五段 |
+| COM 偏移 | torso COM `±0.10m`，模拟平地重心偏移下跑直线 |
+| 地面摩擦 | 0.3-2.0 每次 reset 随机，适应不同地面 |
+
 ### 3. Sim2Sim MuJoCo 修复 (robot_rl/transfer/sim)
 
 | 文件 | 修改内容 |
@@ -112,6 +130,10 @@
 | 5 | `rough_turn` | 5,000 | 0.0-5.1 | 粗糙地形+转向（续训 standrun） | 2.6 m/s (地形太保守) |
 | 6 | **`speed_turn`** | 10,000 | 0.0-5.1 | **速度权重 10x + 转向（续训 standrun）** | **4.94 m/s** ★ |
 | 7 | `speed_turn_v2` | 训练中 | 0.0-5.1 | 手臂 Q 权重 20x 恢复摆臂（续训 speed_turn） | - |
+| 8 | **`steady_upper`** | 29,997 | 0.0-5.1 | 上肢稳定版（续训 speed_turn，arm Q 20x） | ~4.5 m/s |
+| 9 | **`steady_upper_v2`** | 89,996 | 0.0-5.1 | **视觉循迹优化**（续训 steady_upper）：骨盆直立/高度、上半身稳定、速度分段采样、COM/质量/摩擦随机化 | ★ 当前部署 |
+
+> `steady_upper_v2` 针对视觉循迹做了专项优化：新增 standing 轨迹解决低速/站姿低头（相机看不到白线）、骨盆姿态/高度奖励保持相机前视、上半身稳定惩罚抑制抖动、COM 偏移与摩擦随机化增强平地直线鲁棒性。
 
 ---
 
@@ -126,14 +148,18 @@ pip install -e source/robot_rl/
 
 # 全新训练
 /home/ubuntu/IsaacLab/isaaclab.sh -p scripts/rsl_rl/train_policy.py \
-    --env_type=running_clf_29dof --headless --num_envs=4096 --max_iterations=10000 \
+    --env_type=running_clf_29dof --headless --num_envs=2048 --max_iterations=10000 \
     --logger tensorboard
 
 # 续训（从已有 checkpoint 恢复）
 /home/ubuntu/IsaacLab/isaaclab.sh -p scripts/rsl_rl/train_policy.py \
-    --env_type=running_clf_29dof --headless --num_envs=4096 --max_iterations=10000 \
+    --env_type=running_clf_29dof --headless --num_envs=2048 --max_iterations=10000 \
     --logger tensorboard --resume --load_run=<RUN_DIR> --checkpoint=model_9999
 ```
+
+> 注意：`num_envs` 建议用 2048（4096 在部分多 ICD 驱动环境会触发
+> omni `carb::tasking Mutex` 递归锁崩溃）。轨迹库包含 `standing` 轨迹
+> （0 m/s）用于低速/站姿直立训练。
 
 ### 导出策略
 
@@ -189,11 +215,17 @@ P / LB_X      → 被动模式（急停）
 
 6. **rl_sar GetUp→Running 关节状态映射错误**: 两个状态使用不同 `joint_mapping`，切换时状态索引错乱。
 
+7. **4096 env 续训 GPU 死锁**: 多 ICD 驱动环境下 `num_envs=4096` 触发 omni `carb::tasking Mutex` 递归锁崩溃（从零训练正常、续训必现）。改用 `num_envs=2048` 解决。
+
+8. **IsaacSim GUI 卡死**: 多 ICD 驱动（RTX 5090 + Intel 集显 + 双架构 libcuda）下非 headless 模式环境初始化死循环。训练/play 用 `--headless`；可视化用 MuJoCo（rl_sar）。
+
+9. **Git LFS 推送代理超时**: 环境变量 `HTTPS_PROXY=127.0.0.1:7890` 导致 git LFS 上传超时。禁用代理（`-c http.proxy= -c https.proxy=`）+ 关闭 LFS 锁验证后正常。
+
 ---
 
 ## 轨迹库
 
-`trajectories/running/` 包含 1.2~5.0 m/s 的跑步步态（5 阶 Bezier 曲线）。4.0~5.0 m/s 为从 3.6 m/s 外推生成（仅缩放 T，保持关节轨迹形状）。
+`trajectories/running/` 包含 0~5.1 m/s 的跑步步态（5 阶 Bezier 曲线），含官方 `standing` 轨迹（0 m/s，用于低速/站姿直立）。1.2~3.7 m/s 为官方轨迹，4.0~5.0 m/s 为从 3.6 m/s 外推生成（仅缩放 T，保持关节轨迹形状）。
 
 ---
 
@@ -201,7 +233,9 @@ P / LB_X      → 被动模式（急停）
 
 | 文件 | 说明 |
 |------|------|
-| `models/speed_turn/policy.pt` | ★ 最佳 29dof 跑步策略 (JIT TorchScript) |
+| `models/steady_upper_v2/policy.pt` | ★ 当前最佳 29dof 跑步策略（89996 iter, 视觉循迹优化） |
+| `models/steady_upper_v2/policy_parameters.yaml` | 策略参数（观测/动作/KP/KD/默认关节角） |
+| `models/speed_turn/policy.pt` | 速度优先策略 (JIT TorchScript) |
 | `models/speed_turn/policy_parameters.yaml` | 策略参数（观测/动作/KP/KD/默认关节角） |
 | `models/standrun/policy.pt` | 站立+跑步策略（速度优先权重较低版） |
 
