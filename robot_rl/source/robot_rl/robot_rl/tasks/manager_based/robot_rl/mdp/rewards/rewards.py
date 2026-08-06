@@ -604,6 +604,49 @@ def low_speed_upright_reward(
     return 1.0 + standing_mask * (reward - 1.0)
 
 
+def default_posture_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    speed_threshold: float = 0.5,
+    joint_names: list[str] | None = None,
+    std: float = 0.2,
+) -> torch.Tensor:
+    """Reward matching the symmetric default standing posture at low speed.
+
+    When the commanded speed is near zero, the policy should return to the
+    symmetric ``default_dof_pos`` standing pose instead of following a gait
+    trajectory (which may be asymmetric and cause the robot to lean back).
+    This reward masks (softly) by commanded speed and penalizes joint
+    deviation from the default pose.
+
+    Args:
+        env: The environment instance.
+        command_name: Name of the velocity command term.
+        speed_threshold: Commanded x-velocity below which posture is enforced.
+        joint_names: Which joints to enforce; None means all trajectory joints.
+        std: Std for the Gaussian penalty kernel.
+
+    Returns:
+        A tensor of shape (num_envs,) with the standing posture reward.
+    """
+    cmd = env.command_manager.get_term(command_name)
+    vel_cmd_x = cmd.command[:, 0].abs()
+    standing_mask = (vel_cmd_x < speed_threshold).float()
+    asset: Articulation = env.scene["robot"]
+    if joint_names is None:
+        joint_ids = slice(None)
+    else:
+        joint_ids = torch.tensor(
+            [asset.joint_names.index(n) for n in joint_names],
+            dtype=torch.long, device=asset.device,
+        )
+    cur = asset.data.joint_pos[:, joint_ids]
+    default = asset.data.default_joint_pos[:, joint_ids]
+    err = (cur - default) ** 2
+    reward = torch.exp(-torch.sum(err, dim=1) / std**2)
+    return 1.0 + standing_mask * (reward - 1.0)
+
+
 def torque_limits(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Penalize applied torques if they cross the limits.
 

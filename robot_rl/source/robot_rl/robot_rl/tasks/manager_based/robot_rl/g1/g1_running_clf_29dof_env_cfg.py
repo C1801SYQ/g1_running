@@ -304,6 +304,19 @@ class G1Running29dofRewardCfg(G1TrajOptCLFRewards):
         },
     )
 
+    # At low speed, drive the joints back to the symmetric default standing pose
+    # (the asymmetric gait trajectories can otherwise cause the robot to lean
+    # back / fall over when commanded 0 m/s).
+    default_posture = RewTerm(
+        func=mdp.default_posture_reward,
+        weight=4.0,
+        params={
+            "command_name": "base_velocity",
+            "speed_threshold": 0.5,
+            "std": 0.25,
+        },
+    )
+
     if TRACKING_REW_TYPE == "GOAL" or TRACKING_REW_TYPE == "GOAL_ADJ":
         xy_vel = RewTerm(func=mdp.track_lin_vel_xy_exp, weight=10.0,
                          params={"command_name": "base_velocity", "std": 0.5})
