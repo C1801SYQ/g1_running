@@ -1,14 +1,15 @@
 # `g1_running` 跑步策略接入
 
 本目录把 [C1801SYQ/g1_running](https://github.com/C1801SYQ/g1_running)
-的 G1 29 自由度 `speed_turn` TorchScript 策略接到本项目的视觉循迹命令。
+的 G1 29 自由度 `steady_upper_v2` TorchScript 策略接到本项目的视觉循迹命令。
 
 固定上游版本：
 
 ```text
-commit: 4d06065aa9445b8af4db5d465fa79f67736e5e36
+commit: d6d13fb0541a94aac9c8e3340ca8c6470de389fa
+policy version: steady_upper_v2 / model_89996
 policy: rl_sar/policy/g1/running/policy.pt
-SHA256: e3705c5ce94c32c00a4e1900a5e2024deea3a4e22f7b20fbc268f3bcb7e51e57
+SHA256: 167b444f7404a21a4751336b8f7e54c5b0b7cd4b7c979b5ad895288867330305
 license: Apache-2.0
 ```
 
@@ -31,9 +32,9 @@ license: Apache-2.0
   仿真安全支撑据此等待操作员完成 `0 → 1 → 6`，随后先卸载垂直支撑，
   等真实相机姿态稳定并锁定双线后才完全释放。
 - 收到第一个视觉包后，如果超过 300 ms 没有新包，输出速度自动归零。
-- `speed_turn` 训练时横向速度范围为零，因此这里强制 `vy=0`，通过 `wz`
-  转向纠偏。
-- 默认把视觉前进速度限制在 1.0 m/s、转向角速度限制在 0.5 rad/s。
+- 当前巡线控制器保持 `vy=0`，只通过 `wz` 转向纠偏；策略本身仍保留上游的
+  横移与转向训练能力。
+- 仿真默认最大前进指令为 5.1 m/s，视觉转向角速度限制为 0.8 rad/s；实机部署前必须从低速重新验证。
 
 ## 安装和编译
 

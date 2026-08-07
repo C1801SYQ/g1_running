@@ -1,3 +1,4 @@
+import hashlib
 import os
 from pathlib import Path
 import unittest
@@ -39,9 +40,32 @@ RUN_SCRIPT_PATH = VISION_ROOT / "scripts/run_vm_full_demo.sh"
 START_SCRIPT_PATH = VISION_ROOT / "scripts/start_vm_gui.sh"
 ENV_SCRIPT_PATH = VISION_ROOT / "scripts/activate_g1race_dds.sh"
 SIM_SCRIPT_PATH = VISION_ROOT / "scripts/run_unitree_camera_sim.py"
+INSTALL_SCRIPT_PATH = VISION_ROOT / "scripts/install_g1_running.sh"
+BUILD_SCRIPT_PATH = VISION_ROOT / "scripts/build_skill6.sh"
+POLICY_REPOSITORY = (
+    REPOSITORY_CANDIDATE
+    if (
+        REPOSITORY_CANDIDATE / "rl_sar/policy/g1/running/policy.pt"
+    ).is_file()
+    else VM_REPOSITORY
+)
+POLICY_PATH = POLICY_REPOSITORY / "rl_sar/policy/g1/running/policy.pt"
+POLICY_SHA256 = "167b444f7404a21a4751336b8f7e54c5b0b7cd4b7c979b5ad895288867330305"
 
 
 class Skill6TransitionTests(unittest.TestCase):
+    def test_latest_running_policy_checksum_matches_build_scripts(self) -> None:
+        digest = hashlib.sha256(POLICY_PATH.read_bytes()).hexdigest()
+        self.assertEqual(digest, POLICY_SHA256)
+        self.assertIn(
+            POLICY_SHA256,
+            INSTALL_SCRIPT_PATH.read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            POLICY_SHA256,
+            BUILD_SCRIPT_PATH.read_text(encoding="utf-8"),
+        )
+
     def test_num6_has_exactly_one_fsm_entry(self) -> None:
         source = FSM_PATH.read_text(encoding="utf-8")
         self.assertEqual(source.count("Input::Keyboard::Num6"), 1)
@@ -102,6 +126,13 @@ class Skill6TransitionTests(unittest.TestCase):
         self.assertIn("--startup-support-until-skill6", run_source)
         self.assertIn("G1_SKILL6_STABILIZE_SECONDS:-5.0", run_source)
         self.assertIn("G1_VISION_STATUS_PORT", run_source)
+        self.assertIn("--max-yaw-rate", run_source)
+        self.assertIn("G1_RACE_MAX_YAW_RATE:-0.80", run_source)
+        self.assertIn("G1_RACE_LATERAL_KP:-1.25", run_source)
+        self.assertIn("G1_RACE_HEADING_KP:-0.20", run_source)
+        self.assertIn("G1_RACE_IMU_HEADING_KP:-1.10", run_source)
+        self.assertIn("G1_RACE_ERROR_FILTER_ALPHA:-0.45", run_source)
+        self.assertIn("G1_VISION_MAX_WZ", run_source)
         self.assertIn("G1_VISION_SPRINT 1", command_source)
         self.assertIn("G1_VISION_STATUS_PORT", command_source)
 

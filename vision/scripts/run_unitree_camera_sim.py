@@ -151,6 +151,27 @@ def parse_args() -> argparse.Namespace:
         help="Maximum commanded forward acceleration in m/s^2.",
     )
     parser.add_argument(
+        "--max-yaw-rate",
+        type=float,
+        default=0.48,
+        help="Maximum absolute visual yaw-rate command in rad/s.",
+    )
+    parser.add_argument(
+        "--max-yaw-accel",
+        type=float,
+        default=3.0,
+        help="Maximum visual yaw-rate slew in rad/s^2.",
+    )
+    parser.add_argument("--lateral-kp", type=float, default=1.25)
+    parser.add_argument("--heading-kp", type=float, default=0.20)
+    parser.add_argument("--imu-heading-kp", type=float, default=1.10)
+    parser.add_argument(
+        "--error-filter-alpha",
+        type=float,
+        default=0.45,
+        help="EMA weight for the newest lateral-error sample.",
+    )
+    parser.add_argument(
         "--vision-enable-delay",
         type=float,
         default=0.0,
@@ -381,6 +402,12 @@ def main() -> None:
         LaneFollowerConfig(
             cruise_speed_mps=args.speed,
             max_forward_accel_mps2=args.forward_accel,
+            max_yaw_rate_rps=args.max_yaw_rate,
+            max_yaw_accel_rps2=args.max_yaw_accel,
+            lateral_kp=args.lateral_kp,
+            heading_kp=args.heading_kp,
+            imu_heading_kp=args.imu_heading_kp,
+            error_filter_alpha=args.error_filter_alpha,
         )
     )
     sender = UdpCommandSender(args.udp_host, args.udp_port)

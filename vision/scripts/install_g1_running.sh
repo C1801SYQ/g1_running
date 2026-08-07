@@ -4,8 +4,8 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_ROOT="${G1_RUNNING_ROOT:-${HOME}/unitree_ws/g1_running}"
 REPOSITORY="https://github.com/C1801SYQ/g1_running.git"
-COMMIT="4d06065aa9445b8af4db5d465fa79f67736e5e36"
-POLICY_SHA256="e3705c5ce94c32c00a4e1900a5e2024deea3a4e22f7b20fbc268f3bcb7e51e57"
+COMMIT="d6d13fb0541a94aac9c8e3340ca8c6470de389fa"
+POLICY_SHA256="167b444f7404a21a4751336b8f7e54c5b0b7cd4b7c979b5ad895288867330305"
 INTEGRATION="${PROJECT_ROOT}/integrations/g1_running"
 
 if [[ ! -d "${TARGET_ROOT}/.git" ]]; then
@@ -106,7 +106,7 @@ if [[ "${actual_sha256}" != "${POLICY_SHA256}" ]]; then
     exit 1
 fi
 
-echo "策略校验通过，开始编译 rl_real_g1 ..."
+echo "steady_upper_v2 策略校验通过，开始编译 rl_real_g1 ..."
 cd "${TARGET_ROOT}/rl_sar"
 
 # The upstream CMake target builds every supported robot by default. On a G1

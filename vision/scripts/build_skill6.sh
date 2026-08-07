@@ -10,7 +10,7 @@ fi
 RUNNING_REPOSITORY="${G1_RUNNING_ROOT:-${DEFAULT_RUNNING_REPOSITORY}}"
 RL_SAR_ROOT="${RUNNING_REPOSITORY}/rl_sar"
 POLICY_FILE="${RL_SAR_ROOT}/policy/g1/running/policy.pt"
-POLICY_SHA256="e3705c5ce94c32c00a4e1900a5e2024deea3a4e22f7b20fbc268f3bcb7e51e57"
+POLICY_SHA256="167b444f7404a21a4751336b8f7e54c5b0b7cd4b7c979b5ad895288867330305"
 
 if [[ ! -f "${RL_SAR_ROOT}/src/rl_sar/include/vision_udp_command.hpp" ]]; then
     echo "找不到 Skill 6 的视觉 UDP 接口；请确认当前仓库包含视觉扩展。"
@@ -52,4 +52,4 @@ if [[ ! -x "${binary}" ]]; then
     exit 1
 fi
 
-echo "Skill 5/6 共用控制器编译完成：${binary}"
+echo "Skill 5/6 已使用 steady_upper_v2，控制器编译完成：${binary}"

@@ -16,21 +16,22 @@ A closed-loop 100 m sprint stack for the **29-DoF Unitree G1**, integrating MuJo
 - Refits fragmented boundaries from real pixels near the locked pair and separates common camera shake from lane-shape changes; it never invents a missing second line.
 - Fuses visual lateral error with G1 IMU heading feedback for high-speed steering.
 - Adds an isolated **Skill 6** to `rl_sar`: state-1-only entry, lane lock, sprint, timed 100 m crossing, visually guided deceleration, and automatic return to Passive.
-- Includes watchdog behavior, fall detection, repeatable scene generation, launch scripts, and 35 unit tests.
+- Uses the upstream `steady_upper_v2` (`model_89996`) policy for Skills 5/6 and verifies its SHA-256 before building.
+- Includes watchdog behavior, fall detection, repeatable scene generation, launch scripts, and 36 unit tests.
 
 ## Simulation Result
 
 | Metric | Result |
 | --- | ---: |
-| Simulated 100 m control time | 25.64 s |
-| Average forward speed | 3.90 m/s |
+| Simulated 100 m control time | 26.91 s |
+| Average forward speed | 3.71 m/s |
 | Maximum velocity command | 5.10 m/s |
-| Valid two-line frame ratio | 98.6% |
-| Maximum pelvis lateral deviation | 0.559 m |
-| Full stop position | 112.05 m |
+| Valid two-line frame ratio | 94.5% |
+| Maximum pelvis lateral deviation | 1.208 m |
+| Full stop position | 111.17 m |
 | Falls / adjacent-lane switches | 0 / 0 |
 
-Timing starts when the final-height camera locks the lane and acceleration begins; it is not an official competition result.
+This regression uses `steady_upper_v2 / model_89996` with the default `0.8 rad/s` visual yaw-rate limit. Timing starts when the final-height camera locks the lane and acceleration begins; it is not an official competition result. The policy completed the 100 m integration test, but its lateral margin is weaker than the previous policy, so zero-speed posture retraining and further high-speed steering work remain necessary before hardware deployment.
 
 ## Architecture
 
@@ -87,7 +88,7 @@ conda activate g1race
 python -m unittest discover -s tests -v
 ```
 
-The 35 tests cover lane-pair validation, strict single-line rejection, low light and color cast, abrupt exposure changes, motion blur, camera shake, fragmented-line refitting, adjacent-lane rejection, steering direction, acceleration limits, perception dropout, post-finish visual braking, race-scene geometry, and the Skill 6 startup handshake.
+The 36 tests cover the deployed policy checksum, lane-pair validation, strict single-line rejection, low light and color cast, abrupt exposure changes, motion blur, camera shake, fragmented-line refitting, adjacent-lane rejection, steering direction, acceleration limits, perception dropout, post-finish visual braking, race-scene geometry, and the Skill 6 startup handshake.
 
 ## Sim-to-Real Status
 
