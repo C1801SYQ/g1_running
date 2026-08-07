@@ -15,3 +15,6 @@ cmake_build/
 
 # Personal application material: keep locally, never publish.
 docs/PROJECT_INTRO.md
+
+# Context memory (context-manager skill)
+context-memory/
