@@ -15,6 +15,7 @@
 #include "inference_runtime.hpp"
 #include "loop.hpp"
 #include "fsm_g1.hpp"
+#include "vision_udp_command.hpp"
 
 #include <unitree/robot/channel/channel_publisher.hpp>
 #include <unitree/robot/channel/channel_subscriber.hpp>
@@ -253,6 +254,7 @@ private:
     uint8_t mode_machine;
     Gamepad gamepad;
     REMOTE_DATA_RX remote_data_rx;
+    VisionUdpCommandReceiver vision_udp_command;
     ChannelPublisherPtr<LowCmd_> lowcmd_publisher;
     ChannelSubscriberPtr<LowState_> lowstate_subscriber;
     ChannelSubscriberPtr<IMUState_> imutorso_subscriber;

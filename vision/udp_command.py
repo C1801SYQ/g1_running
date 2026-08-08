@@ -35,6 +35,7 @@ class UdpSkill6StatusReceiver:
 
     ENABLED_PAYLOAD = b"G1_VISION_SPRINT 1"
     DISABLED_PAYLOAD = b"G1_VISION_SPRINT 0"
+    STATE1_PAYLOAD = b"G1_VISION_STATE1 1"
 
     def __init__(self, host: str = "127.0.0.1", port: int = 15002):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -43,6 +44,7 @@ class UdpSkill6StatusReceiver:
         self.socket.setblocking(False)
         self.address = self.socket.getsockname()
         self.enabled = False
+        self.state1_entered = False
 
     def poll(self) -> bool:
         while True:
@@ -55,6 +57,8 @@ class UdpSkill6StatusReceiver:
                 self.enabled = True
             elif message == self.DISABLED_PAYLOAD:
                 self.enabled = False
+            elif message == self.STATE1_PAYLOAD:
+                self.state1_entered = True
         return self.enabled
 
     def close(self) -> None:

@@ -151,6 +151,8 @@ void RL_Real::GetState(RobotState<float> *state)
     this->control.x = this->gamepad.ly;
     this->control.y = -this->gamepad.lx;
     this->control.yaw = -this->gamepad.rx;
+    this->vision_udp_command.Apply(
+        this->control.x, this->control.y, this->control.yaw);
 
     state->imu.quaternion[0] = this->unitree_low_state.imu_state().quaternion()[0]; // w
     state->imu.quaternion[1] = this->unitree_low_state.imu_state().quaternion()[1]; // x

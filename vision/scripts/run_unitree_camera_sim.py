@@ -370,6 +370,7 @@ def main() -> None:
     support_release_started_at: float | None = None
     fall_below_since: float | None = None
     skill6_enabled = threading.Event()
+    state1_entered = threading.Event()
     lane_lock_acquired = threading.Event()
     finish_line_crossed = threading.Event()
     race_finished = threading.Event()
@@ -488,14 +489,18 @@ def main() -> None:
             with lock:
                 support_now = time.monotonic()
                 if support_active and args.startup_support_until_skill6:
+                    # The startup tether stays at full power until the C++ FSM
+                    # confirms state 1 (or Skill 6). Only then fade it out, so
+                    # the operator can take as long as needed between 0/1/6
+                    # without the robot collapsing.
                     if (
-                        skill6_enabled.is_set()
+                        (state1_entered.is_set() or skill6_enabled.is_set())
                         and support_release_started_at is None
                     ):
                         support_release_started_at = support_now
                         print(
-                            "[policy] Skill 6 confirmed; fading vertical "
-                            "startup support before lane lock",
+                            "[policy] state 1 confirmed; fading vertical "
+                            "startup support",
                             flush=True,
                         )
                     if support_release_started_at is None:
@@ -689,6 +694,13 @@ def main() -> None:
                 depth_m = last_depth_m
                 now = time.monotonic()
                 status_enabled = status_receiver.poll()
+                if status_receiver.state1_entered and not state1_entered.is_set():
+                    state1_entered.set()
+                    print(
+                        "[skill6] C++ FSM confirmed state 1; releasing "
+                        "startup support",
+                        flush=True,
+                    )
                 if status_enabled and not skill6_enabled.is_set():
                     skill6_enabled.set()
                     skill6_ready_at = now + max(

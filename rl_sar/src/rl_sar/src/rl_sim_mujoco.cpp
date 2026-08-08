@@ -313,13 +313,18 @@ void RL_Sim::GetSysJoystick()
     float lx = -float(this->sys_js_axis[0]) / float(this->sys_js_max_value);
     float rx = -float(this->sys_js_axis[3]) / float(this->sys_js_max_value);
 
+    std::vector<float> joy_scale = this->params.Get<std::vector<float>>("joystick_scale");
+    float joy_scale_x = joy_scale.size() > 0 ? joy_scale[0] : 1.0f;
+    float joy_scale_y = joy_scale.size() > 1 ? joy_scale[1] : 1.0f;
+    float joy_scale_yaw = joy_scale.size() > 2 ? joy_scale[2] : 1.0f;
+
     bool has_input = (ly != 0.0f || lx != 0.0f || rx != 0.0f);
 
     if (has_input)
     {
-        this->control.x = ly;
-        this->control.y = lx;
-        this->control.yaw = rx;
+        this->control.x = ly * joy_scale_x;
+        this->control.y = lx * joy_scale_y;
+        this->control.yaw = rx * joy_scale_yaw;
         this->sys_js_active = true;
     }
     else if (this->sys_js_active)
