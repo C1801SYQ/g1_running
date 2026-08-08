@@ -8,7 +8,7 @@
 
 在 G1 21 自由度跑步策略基础上扩展为 **29 自由度**全身跑步，训练策略实现 0~5.1 m/s 变速跑步 + 转向，并通过 rl_sar 框架部署到 MuJoCo 仿真和实体机器人。
 
-**最终成果：** `steady_upper_v2` 模型实现高速跑步 + 视觉循迹，重点优化低速/站立姿态（骨盆直立、相机视角稳定）、上半身稳定（相机防抖）与鲁棒性（COM 偏移、摩擦随机化）。
+**最终成果：** `steady_upper_v2` 模型实现高速跑步 + 视觉循迹，重点优化低速/站立姿态（骨盆直立、相机视角稳定）、上半身稳定（相机防抖）、yaw 转向能力与鲁棒性（COM 偏移、摩擦随机化）。
 
 ---
 
@@ -39,7 +39,7 @@
 │   ├── models/                  # 训练好的策略文件
 │   │   ├── speed_turn/          # ★ 最佳模型 (4.94 m/s)
 │   │   ├── speed_arm/           # 手臂摆动模型 (4.90 m/s)
-│   │   ├── steady_upper_v2/     # ★ 当前最佳 (89996 iter, 视觉循迹优化)
+│   │   ├── steady_upper_v2/     # ★ 当前最佳 (155200 iter, 视觉循迹+转向强化)
 │   │   └── standrun/            # 站立+跑步模型
 │   └── trajectories/running/    # 跑步步态轨迹库 (1.2~5.0 m/s)
 │
@@ -93,10 +93,22 @@
 | `pelvis_height_reward` (3.0) | 骨盆保持 0.65m 高度，防止下蹲看地 |
 | `low_speed_upright_reward` (3.0) | 低速/静止时强制直立姿态 |
 | `upper_body_stability` (6.0) | 上肢（含腰部）速度/加速度惩罚，抑制相机抖动 |
-| `lat_vel` (3.0) | 横向速度跟踪强化，抗横漂（利于视觉循迹） |
+| `lat_vel` (3.0→1.0) | 横向速度跟踪，后调低以逼策略用 yaw 转向而非横向位移 |
 | 速度分段采样 | `lin_vel_x_segments` 均匀覆盖 0-1.0/1.0-2.5/2.5-4.0/4.0-4.7/4.7-5.1 五段 |
 | COM 偏移 | torso COM `±0.10m`，模拟平地重心偏移下跑直线 |
 | 地面摩擦 | 0.3-2.0 每次 reset 随机，适应不同地面 |
+
+**后续修复迭代**：
+
+| 改动 | 内容 |
+|------|------|
+| `default_posture_reward` (4.0) | 修复 0 m/s 后仰：低速时驱动关节回对称 default 站姿（移除不对称 standing 轨迹） |
+| `torso_roll_rate_reward` (3.0) | 惩罚骨盆横滚角速度，抑制跑步时左右晃动（相机平视） |
+| `torso_ang_vel_penalty` (0.05) | 线性惩罚骨盆角速度，强化抗横摆 |
+| `rel_heading_envs` 0.2→0.4 | 转向训练比例翻倍，增强 yaw 转向能力 |
+| `rel_closed_loop_yaw` 0.30→0.45 | 更多环境用 yaw 闭环跟踪 |
+| `yaw_vel` 8.0→12.0 | 强化 yaw 转向跟踪（对应 yaw_vel 奖励从 2.3 提升到 ~5.0） |
+| `lat_vel` 3.0→1.0 | 减少横向位移依赖，逼策略用 yaw 旋转纠偏 |
 
 ### 3. Sim2Sim MuJoCo 修复 (robot_rl/transfer/sim)
 
@@ -131,9 +143,14 @@
 | 6 | **`speed_turn`** | 10,000 | 0.0-5.1 | **速度权重 10x + 转向（续训 standrun）** | **4.94 m/s** ★ |
 | 7 | `speed_turn_v2` | 训练中 | 0.0-5.1 | 手臂 Q 权重 20x 恢复摆臂（续训 speed_turn） | - |
 | 8 | **`steady_upper`** | 29,997 | 0.0-5.1 | 上肢稳定版（续训 speed_turn，arm Q 20x） | ~4.5 m/s |
-| 9 | **`steady_upper_v2`** | 89,996 | 0.0-5.1 | **视觉循迹优化**（续训 steady_upper）：骨盆直立/高度、上半身稳定、速度分段采样、COM/质量/摩擦随机化（出现后仰问题） | ★ 当前部署 |
+| 9 | **`steady_upper_v2`** | 89,996 | 0.0-5.1 | **视觉循迹优化**（续训 steady_upper）：骨盆直立/高度、上半身稳定、速度分段采样、COM/质量/摩擦随机化（出现后仰问题） | 4.94 m/s |
+| 10 | `steady_upper_v2_posture` | 109,995 | 0.0-5.1 | 修复 0 m/s 后仰：移除不对称 standing 轨迹，新增 default_posture 奖励 | 4.92 m/s |
+| 11 | `steady_upper_v2_torso` | 139,994 | 0.0-5.1 | **上肢稳定**（续训）：torso roll-rate + ang-vel 奖励，抑制左右晃动 | 4.92 m/s |
+| 12 | `steady_upper_v2_turn` | 155,200 | 0.0-5.1 | **转向强化**（续训）：rel_heading_envs 40%、rel_closed_loop_yaw 45%、lat_vel↓、yaw_vel↑，增强 yaw 转向 | ★ 当前部署 |
 
 > `steady_upper_v2` 针对视觉循迹做了专项优化：新增 standing 轨迹解决低速/站姿低头（相机看不到白线）、骨盆姿态/高度奖励保持相机前视、上半身稳定惩罚抑制抖动、COM 偏移与摩擦随机化增强平地直线鲁棒性。
+>
+> 后续迭代持续修复问题：`posture` 修复 0 m/s 后仰（移除不对称 standing 轨迹 + default_posture 奖励）、`torso` 抑制跑步时骨盆左右晃动（torso roll-rate 奖励）、`turn` 强化 yaw 转向（减少横向位移依赖，逼策略用旋转纠偏）。
 
 ---
 
@@ -221,6 +238,16 @@ P / LB_X      → 被动模式（急停）
 
 9. **Git LFS 推送代理超时**: 环境变量 `HTTPS_PROXY=127.0.0.1:7890` 导致 git LFS 上传超时。禁用代理（`-c http.proxy= -c https.proxy=`）+ 关闭 LFS 锁验证后正常。
 
+10. **0 m/s 后仰**: 官方 standing 轨迹双腿不对称（右 hip_pitch=-1.0），0 速度时 CLF 强制跟随导致后仰。移除该轨迹 + 新增 `default_posture_reward` 修复。
+
+11. **上半身左右晃动**: 跑步时骨盆横滚摆动导致相机左右晃、破坏视觉循迹。新增 `torso_roll_rate_reward` + `torso_ang_vel_penalty` 抑制。
+
+12. **视觉寻到相邻跑道**: 机器人横向漂移过大（y 漂到 -3m）时，视觉锁定因软滑动平均跟随漂移而换道。控制器侧加大漂移减速（`lateral_speed_penalty 0.35`）+ 视觉锁定收紧（`max_common_shift_ratio 0.20`）修复。
+
+13. **yaw 转向困难**: 策略倾向用横向位移而非 yaw 旋转纠偏（`lat_vel` 权重高、转向训练比例低）。调高 `rel_heading_envs`/`rel_closed_loop_yaw`、`yaw_vel`，降低 `lat_vel`，重训强化转向。
+
+14. **IsaacSim 测速失真**: transfer/sim 测速因 `v_x_max=3.0`（play 配置工件）限幅、场景/PD 增益不对而失真。正确测速需用 `29dof_basic_scene` + `set_pd_gains_from_policy` + 修正 v_x_max，详见 sim2sim 章节。
+
 ---
 
 ## 轨迹库
@@ -233,7 +260,7 @@ P / LB_X      → 被动模式（急停）
 
 | 文件 | 说明 |
 |------|------|
-| `models/steady_upper_v2/policy.pt` | ★ 当前最佳 29dof 跑步策略（89996 iter, 视觉循迹优化） |
+| `models/steady_upper_v2/policy.pt` | ★ 当前最佳 29dof 跑步策略（155200 iter, 视觉循迹+转向强化） |
 | `models/steady_upper_v2/policy_parameters.yaml` | 策略参数（观测/动作/KP/KD/默认关节角） |
 | `models/speed_turn/policy.pt` | 速度优先策略 (JIT TorchScript) |
 | `models/speed_turn/policy_parameters.yaml` | 策略参数（观测/动作/KP/KD/默认关节角） |
