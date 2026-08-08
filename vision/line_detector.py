@@ -35,9 +35,9 @@ class LaneDetectorConfig:
     vertical_fov_degrees: float = 72.0
     max_abs_heading_error_rad: float = 0.75
     initial_center_weight: float = 0.80
-    temporal_pair_weight: float = 3.00
+    temporal_pair_weight: float = 5.00
     max_boundary_step_ratio: float = 0.18
-    max_common_shift_ratio: float = 0.24
+    max_common_shift_ratio: float = 0.20
     max_lane_width_change_ratio: float = 0.25
     max_pair_center_offset_ratio: float = 0.48
     lock_update_alpha: float = 0.12

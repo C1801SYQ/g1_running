@@ -12,10 +12,10 @@ from .line_detector import DetectionResult
 class LaneFollowerConfig:
     cruise_speed_mps: float = 0.55
     minimum_tracking_speed_mps: float = 0.20
-    lateral_kp: float = 1.25
-    lateral_kd: float = 0.02
+    lateral_kp: float = 1.50
+    lateral_kd: float = 0.04
     heading_kp: float = 0.20
-    imu_heading_kp: float = 1.10
+    imu_heading_kp: float = 0.70
     error_filter_alpha: float = 0.45
     max_forward_accel_mps2: float = 0.35
     max_forward_decel_mps2: float = 1.20
@@ -24,6 +24,12 @@ class LaneFollowerConfig:
     hold_last_command_s: float = 0.35
     slow_after_lost_s: float = 0.90
     stop_after_lost_s: float = 1.50
+    # Stronger lateral-error speed reduction: a large offset means the robot is
+    # drifting toward the lane edge; slow down so steering can recover before
+    # the locked lane changes to an adjacent one.
+    lateral_speed_penalty: float = 0.35
+    heading_speed_penalty: float = 0.10
+    min_error_scale: float = 0.45
 
 
 @dataclass(frozen=True)
@@ -76,9 +82,11 @@ class LaneFollowerController:
             error_scale = float(
                 np.clip(
                     1.0
-                    - 0.18 * abs(self._filtered_lateral)
-                    - 0.10 * abs(result.heading_error_rad),
-                    0.75,
+                    - self.config.lateral_speed_penalty
+                    * abs(self._filtered_lateral)
+                    - self.config.heading_speed_penalty
+                    * abs(result.heading_error_rad),
+                    self.config.min_error_scale,
                     1.0,
                 )
             )
