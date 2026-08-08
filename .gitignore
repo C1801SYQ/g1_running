@@ -18,3 +18,6 @@ docs/PROJECT_INTRO.md
 
 # Context memory (context-manager skill)
 context-memory/
+
+# Local AI tooling / skills - never publish
+.opencode/
