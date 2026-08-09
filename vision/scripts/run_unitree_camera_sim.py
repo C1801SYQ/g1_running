@@ -23,7 +23,12 @@ from g1_race_vision.controller import (
     LaneFollowerController,
 )
 from g1_race_vision.line_detector import WhiteLaneDetector
-from g1_race_vision.rendering import MujocoRgbdRenderer
+from g1_race_vision.rendering import (
+    MujocoRgbdRenderer,
+    average_rotation_matrices,
+    attitude_align_rgbd,
+    gravity_align_rgbd,
+)
 from g1_race_vision.udp_command import (
     UdpCommandSender,
     UdpSkill6StatusReceiver,
@@ -147,28 +152,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--forward-accel",
         type=float,
-        default=1.20,
+        default=3.00,
         help="Maximum commanded forward acceleration in m/s^2.",
     )
     parser.add_argument(
         "--max-yaw-rate",
         type=float,
-        default=0.48,
+        default=0.35,
         help="Maximum absolute visual yaw-rate command in rad/s.",
     )
     parser.add_argument(
         "--max-yaw-accel",
         type=float,
-        default=3.0,
+        default=1.5,
         help="Maximum visual yaw-rate slew in rad/s^2.",
     )
-    parser.add_argument("--lateral-kp", type=float, default=1.25)
+    parser.add_argument("--lateral-kp", type=float, default=0.65)
     parser.add_argument("--heading-kp", type=float, default=0.20)
-    parser.add_argument("--imu-heading-kp", type=float, default=1.10)
+    parser.add_argument("--imu-heading-kp", type=float, default=1.20)
     parser.add_argument(
         "--error-filter-alpha",
         type=float,
-        default=0.45,
+        default=0.32,
         help="EMA weight for the newest lateral-error sample.",
     )
     parser.add_argument(
@@ -184,8 +189,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skill6-stabilize-seconds",
         type=float,
-        default=5.0,
-        help="Wait this long after the C++ controller enters Skill 6.",
+        default=3.2,
+        help=(
+            "Short camera/IMU sampling window after Skill 6 entry before "
+            "locking the starting lane."
+        ),
     )
     parser.add_argument("--show-debug", action="store_true")
     parser.add_argument(
@@ -653,6 +661,12 @@ def main() -> None:
         saved_first_loss_debug = False
         last_depth_m = None
         next_depth = 0.0
+        camera_reference_xmat = None
+        camera_reference_samples: list[np.ndarray] = []
+        max_camera_reference_samples = max(
+            3,
+            int(round(args.camera_fps * 1.0)),
+        )
         try:
             if args.show_debug:
                 # The launcher arranges this dashboard beside the main viewer.
@@ -684,6 +698,25 @@ def main() -> None:
                             rgb, last_depth_m = renderer.render_rgbd(render_data)
                         else:
                             rgb = renderer.render_rgb(render_data)
+                raw_rgb = rgb
+                raw_depth_m = last_depth_m if render_depth else None
+                current_camera_xmat = renderer.camera_xmat(render_data)
+                if camera_reference_xmat is None:
+                    rgb, aligned_depth = gravity_align_rgbd(
+                        raw_rgb,
+                        renderer.roll_correction_rad(render_data),
+                        raw_depth_m,
+                    )
+                else:
+                    rgb, aligned_depth = attitude_align_rgbd(
+                        raw_rgb,
+                        current_camera_xmat,
+                        camera_reference_xmat,
+                        renderer.vertical_fov_degrees,
+                        raw_depth_m,
+                    )
+                if render_depth:
+                    last_depth_m = aligned_depth
                 if render_depth:
                     next_depth = time.monotonic() + 1.0 / max(
                         args.depth_fps, 1e-6
@@ -703,6 +736,8 @@ def main() -> None:
                     )
                 if status_enabled and not skill6_enabled.is_set():
                     skill6_enabled.set()
+                    camera_reference_xmat = None
+                    camera_reference_samples.clear()
                     skill6_ready_at = now + max(
                         0.0, args.skill6_stabilize_seconds
                     )
@@ -718,6 +753,21 @@ def main() -> None:
                 ):
                     skill6_enabled.clear()
                     skill6_ready_at = None
+                    camera_reference_xmat = None
+                    camera_reference_samples.clear()
+                if (
+                    skill6_enabled.is_set()
+                    and not vision_enabled
+                    and camera_reference_xmat is None
+                ):
+                    camera_reference_samples.append(current_camera_xmat.copy())
+                    if (
+                        len(camera_reference_samples)
+                        > max_camera_reference_samples
+                    ):
+                        del camera_reference_samples[
+                            :-max_camera_reference_samples
+                        ]
                 if race_finished.is_set():
                     command = ControllerCommand(
                         0.0, 0.0, 0.0, "FINISHED_WINDOW_HELD", False
@@ -747,19 +797,51 @@ def main() -> None:
                         # Select the target lane only after the running policy
                         # is stable, then keep that lane identity locked for
                         # the entire race.
+                        if camera_reference_xmat is None:
+                            camera_reference_xmat = average_rotation_matrices(
+                                camera_reference_samples
+                                if camera_reference_samples
+                                else [current_camera_xmat]
+                            )
+                        rgb, aligned_depth = attitude_align_rgbd(
+                            raw_rgb,
+                            current_camera_xmat,
+                            camera_reference_xmat,
+                            renderer.vertical_fov_degrees,
+                            raw_depth_m,
+                        )
+                        if render_depth:
+                            last_depth_m = aligned_depth
                         detector.reset()
                         result = detector.detect(
                             rgb, last_depth_m if render_depth else None
                         )
+                        lock_quality_ok = (
+                            result.valid
+                            and not result.boundary_risk
+                            and result.confidence >= 0.50
+                            and abs(result.lateral_error) <= 0.25
+                        )
                         controller.reset()
-                        if result.valid:
+                        if lock_quality_ok:
+                            controller.set_visual_heading_reference(
+                                result.heading_error_rad
+                            )
+                            lateral_reference = result.lateral_error
+                            detector.set_lateral_reference(lateral_reference)
+                            result.lateral_error = 0.0
                             vision_enabled = True
                             with lock:
                                 race_timing["started_at"] = time.monotonic()
                                 race_timing["start_x"] = float(data.qpos[0])
-                                race_timing["heading_yaw"] = yaw_from_wxyz(
-                                    data.qpos[3:7]
-                                )
+                                # The XML start pose is aligned with the race
+                                # straight.  The new running policy can yaw by
+                                # several degrees during the state-1 -> Skill-6
+                                # transition, so capturing that transient as
+                                # the target heading makes the controller hold
+                                # a diagonal course. Keep the immutable
+                                # starting-block heading instead.
+                                race_timing["heading_yaw"] = support_yaw
                             lane_lock_acquired.set()
                             if args.debug_snapshot is not None:
                                 lock_path = (
@@ -773,10 +855,20 @@ def main() -> None:
                                 saved_lock_debug = True
                             print(
                                 "[vision] final-height target lane locked; "
+                                f"lateral reference={lateral_reference:+.3f}; "
+                                "starting-block IMU heading reference="
+                                f"{race_timing['heading_yaw']:+.3f} rad; "
                                 "enabling strict two-line control with "
                                 "acceleration ramp",
                                 flush=True,
                             )
+                        elif result.valid:
+                            # Never start from a gait-phase frame where the
+                            # apparent lane centre is already near a boundary.
+                            # Keep zero velocity and retry against the same
+                            # averaged orientation on the following frame.
+                            result.valid = False
+                            result.source = "lane-lock-wait"
                     finish_approach = False
                     start_x = race_timing["start_x"]
                     heading_reference = race_timing["heading_yaw"]
@@ -811,7 +903,8 @@ def main() -> None:
                             heading_hold_error_rad=heading_hold_error,
                         )
                     elif finish_approach:
-                        command = controller.hold_straight_for_finish(
+                        command = controller.follow_lane_through_finish(
+                            result=result,
                             now=now,
                             heading_hold_error_rad=heading_hold_error,
                         )
@@ -900,7 +993,7 @@ def main() -> None:
                         cv2.LINE_AA,
                     )
                     dashboard = build_camera_dashboard(
-                        rgb,
+                        raw_rgb,
                         debug,
                         result.mask,
                         depth_m,

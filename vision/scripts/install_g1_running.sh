@@ -4,8 +4,8 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_ROOT="${G1_RUNNING_ROOT:-${HOME}/unitree_ws/g1_running}"
 REPOSITORY="https://github.com/C1801SYQ/g1_running.git"
-COMMIT="d6d13fb0541a94aac9c8e3340ca8c6470de389fa"
-POLICY_SHA256="6ee03dfa5c6ecac3dcd29f71e60f1ba08877e15aee378434c111e38d92e490df"
+COMMIT="3d029b92687cfd5a679360aa1d6dd41a9e3079f8"
+POLICY_SHA256="a6c0998c38113b2a471839b247b1424aed5d4da1c6609d60cec8f00f6831ff9c"
 INTEGRATION="${PROJECT_ROOT}/integrations/g1_running"
 
 if [[ ! -d "${TARGET_ROOT}/.git" ]]; then

@@ -10,7 +10,7 @@ fi
 RUNNING_REPOSITORY="${G1_RUNNING_ROOT:-${DEFAULT_RUNNING_REPOSITORY}}"
 RL_SAR_ROOT="${RUNNING_REPOSITORY}/rl_sar"
 POLICY_FILE="${RL_SAR_ROOT}/policy/g1/running/policy.pt"
-POLICY_SHA256="6ee03dfa5c6ecac3dcd29f71e60f1ba08877e15aee378434c111e38d92e490df"
+POLICY_SHA256="a6c0998c38113b2a471839b247b1424aed5d4da1c6609d60cec8f00f6831ff9c"
 
 if [[ ! -f "${RL_SAR_ROOT}/src/rl_sar/include/vision_udp_command.hpp" ]]; then
     echo "找不到 Skill 6 的视觉 UDP 接口；请确认当前仓库包含视觉扩展。"

@@ -50,7 +50,7 @@ POLICY_REPOSITORY = (
     else VM_REPOSITORY
 )
 POLICY_PATH = POLICY_REPOSITORY / "rl_sar/policy/g1/running/policy.pt"
-POLICY_SHA256 = "6ee03dfa5c6ecac3dcd29f71e60f1ba08877e15aee378434c111e38d92e490df"
+POLICY_SHA256 = "a6c0998c38113b2a471839b247b1424aed5d4da1c6609d60cec8f00f6831ff9c"
 
 
 class Skill6TransitionTests(unittest.TestCase):
@@ -123,15 +123,23 @@ class Skill6TransitionTests(unittest.TestCase):
         self.assertIn('"WAIT_FOR_SKILL6"', simulator_source)
         self.assertIn("skill6_enabled.is_set()", simulator_source)
         self.assertIn("lane_lock_acquired.is_set()", simulator_source)
+        self.assertIn(
+            'race_timing["heading_yaw"] = support_yaw',
+            simulator_source,
+        )
         self.assertIn("--startup-support-until-skill6", run_source)
-        self.assertIn("G1_SKILL6_STABILIZE_SECONDS:-5.0", run_source)
+        self.assertIn("G1_SKILL6_STABILIZE_SECONDS:-3.2", run_source)
+        self.assertIn("max_camera_reference_samples", simulator_source)
+        self.assertIn("G1_RACE_ACCEL:-3.00", run_source)
+        self.assertIn("--vision-enable-delay 0.0", run_source)
+        self.assertIn("--startup-support-fade-seconds 3.0", run_source)
         self.assertIn("G1_VISION_STATUS_PORT", run_source)
         self.assertIn("--max-yaw-rate", run_source)
-        self.assertIn("G1_RACE_MAX_YAW_RATE:-0.80", run_source)
-        self.assertIn("G1_RACE_LATERAL_KP:-1.25", run_source)
+        self.assertIn("G1_RACE_MAX_YAW_RATE:-0.35", run_source)
+        self.assertIn("G1_RACE_LATERAL_KP:-0.65", run_source)
         self.assertIn("G1_RACE_HEADING_KP:-0.20", run_source)
-        self.assertIn("G1_RACE_IMU_HEADING_KP:-1.10", run_source)
-        self.assertIn("G1_RACE_ERROR_FILTER_ALPHA:-0.45", run_source)
+        self.assertIn("G1_RACE_IMU_HEADING_KP:-1.20", run_source)
+        self.assertIn("G1_RACE_ERROR_FILTER_ALPHA:-0.32", run_source)
         self.assertIn("G1_VISION_MAX_WZ", run_source)
         self.assertIn("G1_VISION_SPRINT 1", command_source)
         self.assertIn("G1_VISION_STATUS_PORT", command_source)

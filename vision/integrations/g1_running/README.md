@@ -6,10 +6,10 @@
 固定上游版本：
 
 ```text
-commit: d6d13fb0541a94aac9c8e3340ca8c6470de389fa
-policy version: steady_upper_v2 / model_89996
+commit: 3d029b92687cfd5a679360aa1d6dd41a9e3079f8
+policy version: steady_upper_v2 / model_155199
 policy: rl_sar/policy/g1/running/policy.pt
-SHA256: 167b444f7404a21a4751336b8f7e54c5b0b7cd4b7c979b5ad895288867330305
+SHA256: a6c0998c38113b2a471839b247b1424aed5d4da1c6609d60cec8f00f6831ff9c
 license: Apache-2.0
 ```
 
@@ -32,9 +32,9 @@ license: Apache-2.0
   仿真安全支撑据此等待操作员完成 `0 → 1 → 6`，随后先卸载垂直支撑，
   等真实相机姿态稳定并锁定双线后才完全释放。
 - 收到第一个视觉包后，如果超过 300 ms 没有新包，输出速度自动归零。
-- 当前巡线控制器保持 `vy=0`，只通过 `wz` 转向纠偏；策略本身仍保留上游的
-  横移与转向训练能力。
-- 仿真默认最大前进指令为 5.1 m/s，视觉转向角速度限制为 0.8 rad/s；实机部署前必须从低速重新验证。
+- 当前控制器保持 `vy=0`，由策略和 IMU 主跑直线；视觉仅在越出中心走廊时通过
+  有界 `wz` 纠偏，并用不可漂移的起跑锚点拒绝相邻跑道。
+- 仿真默认最大前进指令为 5.1 m/s，纠偏角速度限制为 0.35 rad/s；实机部署前必须从低速重新验证。
 
 ## 安装和编译
 

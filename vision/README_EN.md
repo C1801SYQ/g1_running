@@ -12,26 +12,27 @@ A closed-loop 100 m sprint stack for the **29-DoF Unitree G1**, integrating MuJo
 
 - Reuses the [`C1801SYQ/g1_running`](https://github.com/C1801SYQ/g1_running) 29-DoF TorchScript running policy while keeping perception and joint control separated.
 - Detects two real white lane boundaries using exposure-adaptive segmentation, local contrast, motion-blur-aware morphology, and robust Huber line fitting.
-- Locks the selected lane using width, center, and temporal-continuity constraints to reject adjacent lanes.
+- Creates an immutable start-frame lane anchor; short-term tracking may follow camera shake but cannot walk the lock into an adjacent lane.
 - Refits fragmented boundaries from real pixels near the locked pair and separates common camera shake from lane-shape changes; it never invents a missing second line.
-- Fuses visual lateral error with G1 IMU heading feedback for high-speed steering.
+- Lets the trained policy and G1 IMU hold the straight heading; vision stays neutral inside a center corridor and only applies bounded, hysteretic correction outside it.
 - Adds an isolated **Skill 6** to `rl_sar`: state-1-only entry, lane lock, sprint, timed 100 m crossing, visually guided deceleration, and automatic return to Passive.
-- Uses the upstream `steady_upper_v2` (`model_89996`) policy for Skills 5/6 and verifies its SHA-256 before building.
-- Includes watchdog behavior, fall detection, repeatable scene generation, launch scripts, and 36 unit tests.
+- Uses the upstream `steady_upper_v2` (`model_155199`) policy for Skills 5/6 and verifies its SHA-256 before building.
+- Uses averaged full-attitude homography stabilization, lane-lock zero-bias calibration, IMU straight-heading hold, and bounded vision recovery through the 100 m line.
+- Includes watchdog behavior, fall detection, hard adjacent-lane guards, repeatable scene generation, launch scripts, and 55 unit tests.
 
 ## Simulation Result
 
 | Metric | Result |
 | --- | ---: |
-| Simulated 100 m control time | 26.91 s |
-| Average forward speed | 3.71 m/s |
-| Maximum velocity command | 5.10 m/s |
-| Valid two-line frame ratio | 94.5% |
-| Maximum pelvis lateral deviation | 1.208 m |
-| Full stop position | 111.17 m |
-| Falls / adjacent-lane switches | 0 / 0 |
+| Two consecutive simulated 100 m runs | 29.17–44.32 s |
+| Average forward speed | 2.24–3.43 m/s |
+| Maximum velocity command | 4.54–4.58 m/s |
+| Valid two-line frame ratio | 99.2%–99.3% |
+| Maximum pelvis lateral deviation | 0.543–0.874 m |
+| Full stop position | 100.67–101.88 m |
+| Falls / adjacent-lane switches / identity loss | 0 / 0 / 0 |
 
-This regression uses `steady_upper_v2 / model_89996` with the default `0.8 rad/s` visual yaw-rate limit. Timing starts when the final-height camera locks the lane and acceleration begins; it is not an official competition result. The policy completed the 100 m integration test, but its lateral margin is weaker than the previous policy, so zero-speed posture retraining and further high-speed steering work remain necessary before hardware deployment.
+These results are two consecutive full-stack runs using the final defaults: `model_155199`, a `0.35 rad/s` yaw-rate limit, `3.00 m/s²` command acceleration, and a 3.2 s Skill-6 settling delay that averages only the final 1 s of attitude. Timing starts after the safety lane lock releases acceleration; it is not an official competition time. Hardware deployment still requires staged low-speed validation.
 
 ## Architecture
 
@@ -88,11 +89,11 @@ conda activate g1race
 python -m unittest discover -s tests -v
 ```
 
-The 36 tests cover the deployed policy checksum, lane-pair validation, strict single-line rejection, low light and color cast, abrupt exposure changes, motion blur, camera shake, fragmented-line refitting, adjacent-lane rejection, steering direction, acceleration limits, perception dropout, post-finish visual braking, race-scene geometry, and the Skill 6 startup handshake.
+The 55 tests cover the deployed policy checksum, strict two-line validation, low light and exposure changes, motion blur, full camera-attitude stabilization, immutable adjacent-lane locking, straight-corridor neutrality, correction hysteresis, perception dropout, finish-line braking, scene geometry, and the fast Skill 6 startup handshake.
 
 ## Sim-to-Real Status
 
-`scripts/run_realsense_ros2.py` provides a RealSense ROS 2 input path that reuses the same controller. Physical deployment still requires camera calibration, exposure and motion-blur testing, an independent emergency-stop chain, low-speed staged validation, and real-track robustness evaluation.
+`scripts/run_realsense_ros2.py` provides a RealSense ROS 2 input path that reuses the same controller. Full attitude homography compensation is currently validated only in the MuJoCo camera path; hardware still needs a synchronized G1/D435i attitude input plus timestamp and extrinsic calibration. Physical deployment also requires exposure and motion-blur testing, an independent emergency-stop chain, low-speed staged validation, and real-track robustness evaluation.
 
 Do not apply the simulated `5.10 m/s` command directly during initial hardware testing.
 

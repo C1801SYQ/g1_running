@@ -12,25 +12,43 @@ from .line_detector import DetectionResult
 class LaneFollowerConfig:
     cruise_speed_mps: float = 0.55
     minimum_tracking_speed_mps: float = 0.20
-    lateral_kp: float = 1.00
-    lateral_kd: float = 0.04
+    lateral_kp: float = 0.65
+    lateral_kd: float = 0.08
     heading_kp: float = 0.20
-    imu_heading_kp: float = 0.70
-    error_filter_alpha: float = 0.25
-    lateral_deadband: float = 0.12
+    imu_heading_kp: float = 1.20
+    error_filter_alpha: float = 0.32
+    heading_filter_alpha: float = 0.16
+    max_lateral_error_rate_per_s: float = 1.20
+    max_visual_heading_rate_rps: float = 1.20
+    max_visual_heading_error_rad: float = 0.35
+    max_heading_imu_disagreement_rad: float = 0.25
+    heading_confidence_floor: float = 0.45
+    # The trained policy owns the straight run. Vision enters a bounded
+    # correction mode only after leaving this corridor and stays quiet again
+    # after returning to the smaller exit threshold (Schmitt hysteresis).
+    correction_enter_lateral_error: float = 0.16
+    correction_exit_lateral_error: float = 0.07
+    max_lane_correction_heading_rad: float = 0.10
+    lateral_slow_start: float = 0.08
+    lateral_full_slow: float = 0.32
+    lateral_rate_slow_start_per_s: float = 0.12
+    lateral_rate_full_slow_per_s: float = 0.45
+    imu_heading_slow_start_rad: float = 0.05
+    imu_heading_full_slow_rad: float = 0.20
+    heading_slow_start_rad: float = 0.10
+    heading_full_slow_rad: float = 0.35
+    steering_slow_start_ratio: float = 0.65
+    minimum_speed_scale: float = 0.22
+    yaw_saturation_ratio: float = 0.92
+    yaw_saturation_slow_after_s: float = 0.18
+    yaw_saturation_full_slow_s: float = 0.65
     max_forward_accel_mps2: float = 0.35
-    max_forward_decel_mps2: float = 1.20
-    max_yaw_rate_rps: float = 0.48
-    max_yaw_accel_rps2: float = 3.00
+    max_forward_decel_mps2: float = 3.00
+    max_yaw_rate_rps: float = 0.35
+    max_yaw_accel_rps2: float = 1.50
     hold_last_command_s: float = 0.35
     slow_after_lost_s: float = 0.90
     stop_after_lost_s: float = 1.50
-    # Stronger lateral-error speed reduction: a large offset means the robot is
-    # drifting toward the lane edge; slow down so steering can recover before
-    # the locked lane changes to an adjacent one.
-    lateral_speed_penalty: float = 0.35
-    heading_speed_penalty: float = 0.10
-    min_error_scale: float = 0.45
 
 
 @dataclass(frozen=True)
@@ -48,19 +66,35 @@ class LaneFollowerController:
     def __init__(self, config: LaneFollowerConfig | None = None):
         self.config = config or LaneFollowerConfig()
         self._filtered_lateral = 0.0
+        self._filtered_lateral_rate = 0.0
+        self._filtered_heading = 0.0
         self._previous_lateral = 0.0
         self._previous_wz = 0.0
         self._previous_vx = 0.0
+        self._yaw_saturation_duration_s = 0.0
+        self._correction_direction = 0.0
+        self._visual_heading_reference_rad = 0.0
         self._last_time: float | None = None
         self._last_valid_time: float | None = None
 
     def reset(self) -> None:
         self._filtered_lateral = 0.0
+        self._filtered_lateral_rate = 0.0
+        self._filtered_heading = 0.0
         self._previous_lateral = 0.0
         self._previous_wz = 0.0
         self._previous_vx = 0.0
+        self._yaw_saturation_duration_s = 0.0
+        self._correction_direction = 0.0
+        self._visual_heading_reference_rad = 0.0
         self._last_time = None
         self._last_valid_time = None
+
+    def set_visual_heading_reference(self, heading_error_rad: float) -> None:
+        """Zero a fixed camera/mounting vanishing-point bias at lane lock."""
+
+        self._visual_heading_reference_rad = float(heading_error_rad)
+        self._filtered_heading = 0.0
 
     def update(
         self,
@@ -77,26 +111,78 @@ class LaneFollowerController:
             )
             self._last_valid_time = now
 
-            confidence_scale = 0.78 + 0.22 * float(
+            confidence_scale = 0.72 + 0.28 * float(
                 np.clip(result.confidence, 0.0, 1.0)
             )
-            error_scale = float(
-                np.clip(
-                    1.0
-                    - self.config.lateral_speed_penalty
-                    * abs(self._filtered_lateral)
-                    - self.config.heading_speed_penalty
-                    * abs(result.heading_error_rad),
-                    self.config.min_error_scale,
-                    1.0,
+            correcting = self._correction_direction != 0.0
+            lateral_scale = (
+                self._safety_scale(
+                    abs(self._filtered_lateral),
+                    self.config.lateral_slow_start,
+                    self.config.lateral_full_slow,
+                    self.config.minimum_speed_scale,
                 )
+                if correcting
+                else 1.0
+            )
+            lateral_rate_scale = (
+                self._safety_scale(
+                    abs(self._filtered_lateral_rate),
+                    self.config.lateral_rate_slow_start_per_s,
+                    self.config.lateral_rate_full_slow_per_s,
+                    self.config.minimum_speed_scale,
+                )
+                if correcting
+                else 1.0
+            )
+            # Visual heading is diagnostic only during the straight corridor;
+            # body yaw is held by the IMU reference captured at lane lock.
+            heading_scale = 1.0
+            imu_heading_scale = self._safety_scale(
+                abs(heading_hold_error_rad or 0.0),
+                self.config.imu_heading_slow_start_rad,
+                self.config.imu_heading_full_slow_rad,
+                self.config.minimum_speed_scale,
+            )
+            steering_ratio = abs(wz) / max(self.config.max_yaw_rate_rps, 1e-6)
+            steering_scale = self._safety_scale(
+                steering_ratio,
+                self.config.steering_slow_start_ratio,
+                1.0,
+                max(self.config.minimum_speed_scale, 0.42),
+            )
+            saturation_scale = self._safety_scale(
+                self._yaw_saturation_duration_s,
+                self.config.yaw_saturation_slow_after_s,
+                self.config.yaw_saturation_full_slow_s,
+                self.config.minimum_speed_scale,
+            )
+            boundary_scale = (
+                self.config.minimum_speed_scale
+                if result.boundary_risk
+                else 1.0
+            )
+            safety_scale = min(
+                confidence_scale,
+                lateral_scale,
+                lateral_rate_scale,
+                heading_scale,
+                imu_heading_scale,
+                steering_scale,
+                saturation_scale,
+                boundary_scale,
             )
             vx = max(
                 self.config.minimum_tracking_speed_mps,
-                self.config.cruise_speed_mps * confidence_scale * error_scale,
+                self.config.cruise_speed_mps * safety_scale,
             )
             vx = self._rate_limit_vx(vx, dt)
-            return ControllerCommand(vx, 0.0, wz, "LINE_FOLLOW", True)
+            state = (
+                "LINE_FOLLOW_BOUNDARY_RECOVERY"
+                if result.boundary_risk
+                else "LINE_FOLLOW"
+            )
+            return ControllerCommand(vx, 0.0, wz, state, True)
 
         if self._last_valid_time is None:
             self._previous_wz = self._rate_limit(
@@ -107,6 +193,33 @@ class LaneFollowerController:
 
         lost_for = now - self._last_valid_time
         if lost_for <= self.config.hold_last_command_s:
+            if (
+                abs(self._filtered_lateral)
+                >= self.config.lateral_slow_start
+            ):
+                desired_heading = self._desired_lane_heading()
+                recovery_wz = -self.config.imu_heading_kp * (
+                    (heading_hold_error_rad or 0.0) - desired_heading
+                )
+                recovery_wz = float(
+                    np.clip(
+                        recovery_wz,
+                        -self.config.max_yaw_rate_rps,
+                        self.config.max_yaw_rate_rps,
+                    )
+                )
+                wz = self._rate_limit(recovery_wz, dt)
+                vx = self._rate_limit_vx(
+                    self.config.minimum_tracking_speed_mps,
+                    dt,
+                )
+                return ControllerCommand(
+                    vx,
+                    0.0,
+                    wz,
+                    "VISION_DROPOUT_BOUNDARY_RECOVERY",
+                    False,
+                )
             # Zero yaw-rate means keep the current body heading.  Forward speed
             # is held briefly, preventing a one-frame vision dropout from
             # causing the locomotion policy to stumble.
@@ -154,21 +267,25 @@ class LaneFollowerController:
         state = "FAILSAFE_STOP" if vx <= 1e-3 else "FAILSAFE_BRAKE"
         return ControllerCommand(vx, 0.0, wz, state, False)
 
-    def hold_straight_for_finish(
+    def follow_lane_through_finish(
         self,
+        result: DetectionResult,
         now: float | None = None,
         heading_hold_error_rad: float | None = None,
     ) -> ControllerCommand:
-        """Ignore finish-stripe pixels and hold speed with zero yaw-rate."""
+        """Keep normal two-line correction active until 100 m is crossed."""
 
-        now = time.monotonic() if now is None else float(now)
-        dt = self._time_step(now)
-        vx = self._rate_limit_vx(self.config.cruise_speed_mps, dt)
-        wz = self._rate_limit(
-            self._heading_hold_target(heading_hold_error_rad), dt
+        command = self.update(
+            result,
+            now=now,
+            heading_hold_error_rad=heading_hold_error_rad,
         )
         return ControllerCommand(
-            vx, 0.0, wz, "FINISH_APPROACH_HEADING_HOLD", False
+            command.vx,
+            command.vy,
+            command.wz,
+            "FINISH_APPROACH_LANE_FOLLOW",
+            command.perception_valid,
         )
 
     def brake_after_finish(
@@ -201,29 +318,57 @@ class LaneFollowerController:
         dt: float,
         heading_hold_error_rad: float | None,
     ) -> float:
-        alpha = self.config.error_filter_alpha
-        self._filtered_lateral = (
+        alpha = float(np.clip(self.config.error_filter_alpha, 0.0, 1.0))
+        lateral_target = (
             alpha * result.lateral_error
             + (1.0 - alpha) * self._filtered_lateral
         )
-        derivative = (
+        max_lateral_delta = self.config.max_lateral_error_rate_per_s * dt
+        self._filtered_lateral += float(
+            np.clip(
+                lateral_target - self._filtered_lateral,
+                -max_lateral_delta,
+                max_lateral_delta,
+            )
+        )
+        derivative_raw = (
             self._filtered_lateral - self._previous_lateral
         ) / dt
+        self._filtered_lateral_rate = (
+            0.18 * derivative_raw
+            + 0.82 * self._filtered_lateral_rate
+        )
         self._previous_lateral = self._filtered_lateral
-        # Lateral deadband: ignore small lateral offsets so that measurement
-        # noise / gait sway does not produce a limit-cycle oscillation of wz.
-        lateral = (
-            self._filtered_lateral
-            if abs(self._filtered_lateral) > self.config.lateral_deadband
-            else 0.0
+        self._update_correction_mode()
+        self._update_filtered_heading(
+            result,
+            dt,
+            heading_hold_error_rad,
         )
-        raw_wz = -(
-            self.config.lateral_kp * lateral
-            + self.config.lateral_kd * derivative
-            + self.config.heading_kp * result.heading_error_rad
-            + self.config.imu_heading_kp
-            * (heading_hold_error_rad or 0.0)
+        # Treat the lane error as a bounded desired body heading.  Directly
+        # mapping a large lateral error to yaw rate creates an under-damped
+        # weave at sprint speed: the robot crosses the centre while still
+        # carrying a large yaw angle.  The inner IMU loop damps that angle.
+        desired_heading = self._desired_lane_heading()
+        heading_error = (
+            (heading_hold_error_rad or 0.0) - desired_heading
         )
+        # Do not continuously steer from the camera's visual heading. The
+        # trained running policy plus IMU heading hold produce the straight
+        # trajectory; vision only supplies the bounded lateral recovery angle.
+        raw_wz = -(self.config.imu_heading_kp * heading_error)
+        saturated = (
+            abs(raw_wz)
+            >= self.config.yaw_saturation_ratio
+            * self.config.max_yaw_rate_rps
+        )
+        if saturated:
+            self._yaw_saturation_duration_s += dt
+        else:
+            self._yaw_saturation_duration_s = max(
+                0.0,
+                self._yaw_saturation_duration_s - 2.0 * dt,
+            )
         target_wz = float(
             np.clip(
                 raw_wz,
@@ -232,6 +377,133 @@ class LaneFollowerController:
             )
         )
         return self._rate_limit(target_wz, dt)
+
+    def _desired_lane_heading(self) -> float:
+        if self._correction_direction == 0.0:
+            return 0.0
+
+        # Keep one correction direction until the robot is back inside the
+        # exit corridor. This prevents left/right command chatter when gait
+        # sway makes the measured centre cross zero on consecutive frames.
+        signed_error = self._correction_direction * self._filtered_lateral
+        lateral = self._correction_direction * max(
+            0.0,
+            signed_error - self.config.correction_exit_lateral_error,
+        )
+        lateral_rate = self._correction_direction * max(
+            0.0,
+            self._correction_direction * self._filtered_lateral_rate,
+        )
+        lane_guidance = (
+            self.config.lateral_kp * lateral
+            + self.config.lateral_kd * lateral_rate
+        )
+        return float(
+            np.clip(
+                -lane_guidance / max(self.config.imu_heading_kp, 1e-6),
+                -self.config.max_lane_correction_heading_rad,
+                self.config.max_lane_correction_heading_rad,
+            )
+        )
+
+    def _update_correction_mode(self) -> None:
+        magnitude = abs(self._filtered_lateral)
+        if self._correction_direction == 0.0:
+            if magnitude >= self.config.correction_enter_lateral_error:
+                self._correction_direction = float(
+                    np.sign(self._filtered_lateral)
+                )
+            return
+        if magnitude <= self.config.correction_exit_lateral_error:
+            self._correction_direction = 0.0
+
+    def _update_filtered_heading(
+        self,
+        result: DetectionResult,
+        dt: float,
+        heading_hold_error_rad: float | None,
+    ) -> None:
+        """Reject camera-shake spikes and fuse visual heading with the IMU."""
+
+        visual_heading = float(
+            np.arctan2(
+                np.sin(
+                    result.heading_error_rad
+                    - self._visual_heading_reference_rad
+                ),
+                np.cos(
+                    result.heading_error_rad
+                    - self._visual_heading_reference_rad
+                ),
+            )
+        )
+        imu_heading = (
+            None
+            if heading_hold_error_rad is None
+            else float(heading_hold_error_rad)
+        )
+        visual_is_plausible = (
+            result.confidence >= self.config.heading_confidence_floor
+            and abs(visual_heading)
+            <= self.config.max_visual_heading_error_rad
+        )
+        if (
+            visual_is_plausible
+            and imu_heading is not None
+            and abs(visual_heading - imu_heading)
+            > self.config.max_heading_imu_disagreement_rad
+        ):
+            visual_is_plausible = False
+
+        if visual_is_plausible:
+            measurement = visual_heading
+        elif imu_heading is not None:
+            measurement = imu_heading
+        else:
+            measurement = self._filtered_heading
+
+        measurement = float(
+            np.clip(
+                measurement,
+                -self.config.max_visual_heading_error_rad,
+                self.config.max_visual_heading_error_rad,
+            )
+        )
+        alpha = float(np.clip(self.config.heading_filter_alpha, 0.0, 1.0))
+        target = (
+            alpha * measurement
+            + (1.0 - alpha) * self._filtered_heading
+        )
+        max_delta = self.config.max_visual_heading_rate_rps * dt
+        self._filtered_heading += float(
+            np.clip(
+                target - self._filtered_heading,
+                -max_delta,
+                max_delta,
+            )
+        )
+
+    @staticmethod
+    def _safety_scale(
+        value: float,
+        slow_start: float,
+        full_slow: float,
+        minimum_scale: float,
+    ) -> float:
+        """Return a continuous 1..minimum_scale safety speed multiplier."""
+
+        if value <= slow_start:
+            return 1.0
+        if full_slow <= slow_start:
+            return float(minimum_scale)
+        progress = float(
+            np.clip(
+                (value - slow_start) / (full_slow - slow_start),
+                0.0,
+                1.0,
+            )
+        )
+        return float(1.0 - progress * (1.0 - minimum_scale))
 
     def _time_step(self, now: float) -> float:
         dt = (

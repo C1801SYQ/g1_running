@@ -12,7 +12,10 @@ class LaneDetectorConfig:
     """Parameters for detecting two white lane boundaries in an RGB image."""
 
     roi_top_ratio: float = 0.38
-    lookahead_ratio: float = 0.22
+    # Keep the far geometry row measurably below the vanishing point.  At a
+    # sprinting torso pitch, sampling too near the horizon makes two genuine
+    # boundaries cross by a few fitted pixels and falsely fail strict pairing.
+    lookahead_ratio: float = 0.30
     white_value_min: int = 175
     white_saturation_max: int = 100
     adaptive_value_floor: int = 55
@@ -39,11 +42,23 @@ class LaneDetectorConfig:
     max_boundary_step_ratio: float = 0.18
     max_common_shift_ratio: float = 0.20
     max_lane_width_change_ratio: float = 0.25
-    max_pair_center_offset_ratio: float = 0.48
+    # Initial lock is allowed only on the lane containing the camera's
+    # near-field ground ray. This excludes a fully visible neighbouring lane.
+    max_pair_center_offset_ratio: float = 0.18
+    # Unlike the short-term tracking geometry, this start-line anchor is never
+    # updated. It makes a gradual walk from the selected lane to its neighbour
+    # impossible even if every individual frame-to-frame step looks small.
+    max_anchor_common_shift_ratio: float = 0.22
+    max_anchor_boundary_deformation_ratio: float = 0.12
+    max_anchor_lane_width_change_ratio: float = 0.20
     lock_update_alpha: float = 0.12
     guided_search_margin_ratio: float = 0.075
     guided_min_pixels: int = 70
     guided_min_vertical_span_ratio: float = 0.18
+    max_abs_lateral_error: float = 0.58
+    boundary_warning_lateral_error: float = 0.40
+    boundary_recovery_lateral_error: float = 0.30
+    boundary_breach_confirm_frames: int = 30
 
 
 @dataclass(frozen=True)
@@ -67,6 +82,7 @@ class DetectionResult:
     heading_error_rad: float = 0.0
     confidence: float = 0.0
     source: str = "none"
+    boundary_risk: bool = False
     left_line: Optional[LineModel] = None
     right_line: Optional[LineModel] = None
     roi_y: int = 0
@@ -83,12 +99,28 @@ class WhiteLaneDetector:
     def __init__(self, config: LaneDetectorConfig | None = None):
         self.config = config or LaneDetectorConfig()
         self._locked_pair_geometry: Optional[np.ndarray] = None
+        self._lane_anchor_geometry: Optional[np.ndarray] = None
         self._adaptive_value_threshold: Optional[float] = None
+        self._last_valid_lateral_error = 0.0
+        self._boundary_breach_frames = 0
+        self._lane_identity_lost = False
+        self._lateral_reference = 0.0
 
     def reset(self) -> None:
         """Forget the selected lane so the next valid pair becomes the target."""
 
         self._locked_pair_geometry = None
+        self._lane_anchor_geometry = None
+        self._last_valid_lateral_error = 0.0
+        self._boundary_breach_frames = 0
+        self._lane_identity_lost = False
+        self._lateral_reference = 0.0
+
+    def set_lateral_reference(self, lateral_error: float) -> None:
+        """Make the locked start pose the zero-error centre of the lane."""
+
+        self._lateral_reference = float(lateral_error)
+        self._last_valid_lateral_error = 0.0
 
     def detect(
         self, rgb: np.ndarray, depth_m: Optional[np.ndarray] = None
@@ -171,6 +203,17 @@ class WhiteLaneDetector:
                 value_threshold,
                 pair_source,
             )
+            # A chest camera is not necessarily centred over the pelvis, and
+            # the running policy can hold a small steady torso translation.
+            # Calibrating once at lane lock removes that fixed image-space
+            # offset without changing which physical pair remains selected.
+            result.lateral_error = float(
+                np.clip(
+                    result.lateral_error - self._lateral_reference,
+                    -2.0,
+                    2.0,
+                )
+            )
             if (
                 abs(result.heading_error_rad)
                 > self.config.max_abs_heading_error_rad
@@ -185,18 +228,93 @@ class WhiteLaneDetector:
                     value_threshold=value_threshold,
                     mask=mask,
                 )
+            if self._lane_identity_lost:
+                return self._guarded_invalid_result(
+                    result,
+                    source="lane-identity-lost",
+                )
+            if (
+                abs(result.lateral_error)
+                > self.config.max_abs_lateral_error
+            ):
+                self._record_boundary_breach()
+                if self._lane_identity_lost:
+                    return self._guarded_invalid_result(
+                        result,
+                        source="lane-identity-lost",
+                    )
+                result.source = "boundary-warning"
+                result.boundary_risk = True
+            elif (
+                abs(result.lateral_error)
+                >= self.config.boundary_warning_lateral_error
+            ):
+                result.source = "boundary-warning"
+                result.boundary_risk = True
+            if (
+                abs(result.lateral_error)
+                <= self.config.boundary_recovery_lateral_error
+            ):
+                self._boundary_breach_frames = 0
+            elif not result.boundary_risk:
+                self._boundary_breach_frames = max(
+                    0,
+                    self._boundary_breach_frames - 1,
+                )
+            self._last_valid_lateral_error = result.lateral_error
             self._remember_pair(left, right, width, lookahead_y, bottom_y)
             return result
 
+        if (
+            abs(self._last_valid_lateral_error)
+            >= self.config.boundary_warning_lateral_error
+        ):
+            self._record_boundary_breach()
         return DetectionResult(
             valid=False,
-            source="none",
+            source=(
+                "lane-identity-lost"
+                if self._lane_identity_lost
+                else "none"
+            ),
             roi_y=roi_y,
             lookahead_y=lookahead_y,
             image_width=width,
             image_height=height,
             value_threshold=value_threshold,
             mask=mask,
+        )
+
+    def _record_boundary_breach(self) -> None:
+        self._boundary_breach_frames += 1
+        if (
+            self._boundary_breach_frames
+            >= self.config.boundary_breach_confirm_frames
+        ):
+            self._lane_identity_lost = True
+
+    @staticmethod
+    def _guarded_invalid_result(
+        result: DetectionResult,
+        source: str,
+    ) -> DetectionResult:
+        """Preserve observed boundaries for diagnostics but forbid steering."""
+
+        return DetectionResult(
+            valid=False,
+            lateral_error=result.lateral_error,
+            heading_error_rad=result.heading_error_rad,
+            confidence=result.confidence,
+            source=source,
+            boundary_risk=True,
+            left_line=result.left_line,
+            right_line=result.right_line,
+            roi_y=result.roi_y,
+            lookahead_y=result.lookahead_y,
+            image_width=result.image_width,
+            image_height=result.image_height,
+            value_threshold=result.value_threshold,
+            mask=result.mask,
         )
 
     def _build_white_mask(
@@ -341,7 +459,8 @@ class WhiteLaneDetector:
                     left.x_at(bottom_y) + right.x_at(bottom_y)
                 )
                 if (
-                    abs(pair_center - image_center)
+                    self._lane_anchor_geometry is None
+                    and abs(pair_center - image_center)
                     > self.config.max_pair_center_offset_ratio * width
                 ):
                     # A neighbouring lane can be fully visible, but it does
@@ -356,6 +475,8 @@ class WhiteLaneDetector:
                     geometry = self._pair_geometry(
                         left, right, width, lookahead_y, bottom_y
                     )
+                    if not self._matches_lane_anchor(geometry):
+                        continue
                     previous = self._locked_pair_geometry
                     # Near-field boundary positions remain stable under the
                     # large torso pitch oscillation of the running gait. Far
@@ -521,12 +642,38 @@ class WhiteLaneDetector:
         geometry = self._pair_geometry(
             left, right, width, lookahead_y, bottom_y
         )
+        if self._lane_anchor_geometry is None:
+            self._lane_anchor_geometry = geometry.copy()
         if self._locked_pair_geometry is None:
             self._locked_pair_geometry = geometry
             return
         alpha = self.config.lock_update_alpha
         self._locked_pair_geometry = (
             alpha * geometry + (1.0 - alpha) * self._locked_pair_geometry
+        )
+
+    def _matches_lane_anchor(self, geometry: np.ndarray) -> bool:
+        """Reject every pair that cannot be the start-line target lane."""
+
+        if self._lane_anchor_geometry is None:
+            return True
+        anchor = self._lane_anchor_geometry
+        near_delta = geometry[:2] - anchor[:2]
+        common_shift = float(abs(np.mean(near_delta)))
+        deformation = float(
+            np.max(np.abs(near_delta - np.mean(near_delta)))
+        )
+        anchor_width = float(anchor[1] - anchor[0])
+        width_change = float(
+            abs((geometry[1] - geometry[0]) - anchor_width)
+        )
+        return (
+            common_shift <= self.config.max_anchor_common_shift_ratio
+            and deformation
+            <= self.config.max_anchor_boundary_deformation_ratio
+            and width_change
+            <= self.config.max_anchor_lane_width_change_ratio
+            * max(anchor_width, 1e-6)
         )
 
     def _result_from_pair(
