@@ -12,11 +12,12 @@ from .line_detector import DetectionResult
 class LaneFollowerConfig:
     cruise_speed_mps: float = 0.55
     minimum_tracking_speed_mps: float = 0.20
-    lateral_kp: float = 1.50
+    lateral_kp: float = 1.00
     lateral_kd: float = 0.04
     heading_kp: float = 0.20
     imu_heading_kp: float = 0.70
-    error_filter_alpha: float = 0.45
+    error_filter_alpha: float = 0.25
+    lateral_deadband: float = 0.12
     max_forward_accel_mps2: float = 0.35
     max_forward_decel_mps2: float = 1.20
     max_yaw_rate_rps: float = 0.48
@@ -209,8 +210,15 @@ class LaneFollowerController:
             self._filtered_lateral - self._previous_lateral
         ) / dt
         self._previous_lateral = self._filtered_lateral
+        # Lateral deadband: ignore small lateral offsets so that measurement
+        # noise / gait sway does not produce a limit-cycle oscillation of wz.
+        lateral = (
+            self._filtered_lateral
+            if abs(self._filtered_lateral) > self.config.lateral_deadband
+            else 0.0
+        )
         raw_wz = -(
-            self.config.lateral_kp * self._filtered_lateral
+            self.config.lateral_kp * lateral
             + self.config.lateral_kd * derivative
             + self.config.heading_kp * result.heading_error_rad
             + self.config.imu_heading_kp
