@@ -510,6 +510,55 @@ def pelvis_upright_reward(
     return roll_reward * pitch_reward
 
 
+def torso_roll_rate_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="pelvis_link"),
+    roll_std: float = 0.5,
+) -> torch.Tensor:
+    """Reward keeping the torso roll rate (lateral sway) near zero.
+
+    The robot currently sways side-to-side (roll oscillation), which makes the
+    onboard camera swing left/right and breaks vision lane-following. This
+    reward penalizes the pelvis roll angular velocity directly.
+
+    Args:
+        env: The environment instance.
+        asset_cfg: Configuration for the articulation asset and pelvis body.
+        roll_std: Std for the Gaussian roll-rate penalty kernel.
+
+    Returns:
+        A tensor of shape (num_envs,) with the roll-rate reward contribution.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    # body_ang_vel_w: [num_envs, num_bodies, 3]; component 0 is the roll rate.
+    ang_vel = asset.data.body_ang_vel_w[:, asset_cfg.body_ids, :]
+    roll_rate = ang_vel[..., 0]
+    # Squeeze the (possibly 1-element) body dimension.
+    roll_rate = roll_rate.squeeze(-1)
+    return torch.exp(-roll_rate**2 / roll_std**2)
+
+
+def torso_ang_vel_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="pelvis_link"),
+) -> torch.Tensor:
+    """Linear penalty on the torso angular velocity magnitude (non-saturating).
+
+    Complements the exponential roll-rate reward with an unbounded squared
+    penalty so fast lateral sway of the torso is strongly discouraged.
+
+    Args:
+        env: The environment instance.
+        asset_cfg: Configuration for the articulation asset and pelvis body.
+
+    Returns:
+        A tensor of shape (num_envs,) with the torso angular velocity penalty.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    ang_vel = asset.data.body_ang_vel_w[:, asset_cfg.body_ids, :]
+    return torch.sum(ang_vel**2, dim=-1).sum(dim=-1)
+
+
 def pelvis_height_reward(
     env: ManagerBasedRLEnv,
     target_height: float = 0.65,
@@ -644,6 +693,41 @@ def default_posture_reward(
     default = asset.data.default_joint_pos[:, joint_ids]
     err = (cur - default) ** 2
     reward = torch.exp(-torch.sum(err, dim=1) / std**2)
+    return 1.0 + standing_mask * (reward - 1.0)
+
+
+def low_speed_joint_stillness_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    speed_threshold: float = 0.5,
+    joint_vel_std: float = 0.15,
+    joint_acc_std: float = 0.5,
+) -> torch.Tensor:
+    """Reward fully still joints at low / zero commanded speed.
+
+    When the commanded forward speed is near zero the robot should hold its
+    joints completely still (no residual joint motion / drift). This penalizes
+    the joint velocity and acceleration magnitudes inside the standing mask.
+
+    Args:
+        env: The environment instance.
+        command_name: Name of the velocity command term.
+        speed_threshold: Commanded x-velocity below which stillness is enforced.
+        joint_vel_std: Std for the joint-velocity penalty kernel.
+        joint_acc_std: Std for the joint-acceleration penalty kernel.
+
+    Returns:
+        A tensor of shape (num_envs,) with the stillness reward contribution.
+    """
+    cmd = env.command_manager.get_term(command_name)
+    vel_cmd_x = cmd.command[:, 0].abs()
+    standing_mask = (vel_cmd_x < speed_threshold).float()
+    asset: Articulation = env.scene["robot"]
+    joint_vel = asset.data.joint_vel
+    joint_acc = asset.data.joint_acc
+    vel_penalty = torch.sum(joint_vel**2, dim=1) / joint_vel_std**2
+    acc_penalty = torch.sum(joint_acc**2, dim=1) / joint_acc_std**2
+    reward = torch.exp(-(vel_penalty + acc_penalty))
     return 1.0 + standing_mask * (reward - 1.0)
 
 

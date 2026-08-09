@@ -192,11 +192,11 @@ class G1Running29dofCommandsCfg(HumanoidCommandsCfg):
         asset_name="robot",
         resampling_time_range=(7.0, 10.0),
         rel_standing_envs=0.0,
-        rel_closed_loop=0.40,
-        rel_closed_loop_yaw=0.30,
-        rel_open_loop=0.30,
+        rel_closed_loop=0.35,
+        rel_closed_loop_yaw=0.45,
+        rel_open_loop=0.20,
         heading_command=True,       # Enable heading commands
-        rel_heading_envs=0.2,       # 20% envs practice turning/heading
+        rel_heading_envs=0.4,       # 40% envs practice turning/heading (was 20%)
         debug_vis=False,
         ranges=VelocityTrackingCommandCfg.VelRanges(
             lin_vel_x=(-1.0, 1.0),
@@ -221,10 +221,13 @@ if TRACKING_REW_TYPE == "GOAL_ADJ" or TRACKING_REW_TYPE == "GOAL":
 else:
     CLF_WEIGHT = 2.0
 EXTRA_JOINT_POS_WEIGHT = 5.0  # Penalize deviation from default for joints without trajectory refs
-UPPER_BODY_WEIGHT = 6.0       # Stronger camera steadiness (was 1.0)
+UPPER_BODY_WEIGHT = 8.0       # Stronger camera steadiness (was 6.0)
 PELVIS_UPRIGHT_WEIGHT = 4.0   # Keep torso upright so the camera sees the white lines
+TORS_ROLL_RATE_WEIGHT = 3.0   # Penalize torso roll rate (lateral sway) for vision stability
+TORS_ANG_VEL_WEIGHT = 0.05    # Linear penalty on torso angular velocity magnitude
 PELVIS_HEIGHT_WEIGHT = 3.0    # Keep pelvis at nominal running height (anti-crouch)
 LOW_SPEED_UPRIGHT_WEIGHT = 3.0  # Upright posture enforced at low speed / standing
+LOW_SPEED_STILL_WEIGHT = 3.0     # Joints fully still at low / zero speed (no drift)
 
 
 @configclass
@@ -283,6 +286,28 @@ class G1Running29dofRewardCfg(G1TrajOptCLFRewards):
         },
     )
 
+    # Penalize torso roll rate directly: the current gait sways side-to-side
+    # (roll oscillation), which swings the onboard camera and breaks vision
+    # lane-following. Exponential form keeps gradients gentle.
+    torso_roll_rate = RewTerm(
+        func=mdp.torso_roll_rate_reward,
+        weight=TORS_ROLL_RATE_WEIGHT,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="pelvis_link"),
+            "roll_std": 0.5,
+        },
+    )
+
+    # Non-saturating penalty on torso angular velocity magnitude: strongly
+    # discourages fast lateral sway of the pelvis/torso.
+    torso_ang_vel = RewTerm(
+        func=mdp.torso_ang_vel_penalty,
+        weight=-TORS_ANG_VEL_WEIGHT,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="pelvis_link"),
+        },
+    )
+
     # Keep the pelvis at nominal running height so the camera is not staring at the ground.
     pelvis_height = RewTerm(
         func=mdp.pelvis_height_reward,
@@ -317,15 +342,28 @@ class G1Running29dofRewardCfg(G1TrajOptCLFRewards):
         },
     )
 
+    # At low / zero commanded speed, keep all joints completely still so the
+    # robot stands motionless (no residual joint drift / sway).
+    low_speed_joint_stillness = RewTerm(
+        func=mdp.low_speed_joint_stillness_reward,
+        weight=LOW_SPEED_STILL_WEIGHT,
+        params={
+            "command_name": "base_velocity",
+            "speed_threshold": 0.5,
+            "joint_vel_std": 0.15,
+            "joint_acc_std": 0.5,
+        },
+    )
+
     if TRACKING_REW_TYPE == "GOAL" or TRACKING_REW_TYPE == "GOAL_ADJ":
         xy_vel = RewTerm(func=mdp.track_lin_vel_xy_exp, weight=10.0,
                          params={"command_name": "base_velocity", "std": 0.5})
-        yaw_vel = RewTerm(func=mdp.track_ang_vel_z_exp, weight=8.0,
+        yaw_vel = RewTerm(func=mdp.track_ang_vel_z_exp, weight=12.0,
                           params={"command_name": "base_velocity", "std": 0.5})
-        # Stronger lateral tracking so the robot resists drifting off the target
-        # line during vision lane-following. The base xy term still handles it,
-        # but an explicit y term avoids diluting the lateral objective.
-        lat_vel = RewTerm(func=mdp.track_lin_vel_y_exp, weight=3.0,
+        # Stronger yaw tracking so the robot turns by rotating instead of drifting
+        # laterally. Lateral velocity is de-emphasized (1.0) to force yaw steering;
+        # straight-line forward tracking (xy_vel=10) stays the top priority.
+        lat_vel = RewTerm(func=mdp.track_lin_vel_y_exp, weight=1.0,
                           params={"command_name": "base_velocity", "std": 0.4})
 
 
