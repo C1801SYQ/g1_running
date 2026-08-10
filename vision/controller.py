@@ -26,11 +26,19 @@ class LaneFollowerConfig:
     # The trained policy owns the straight run. Vision enters a bounded
     # correction mode only after leaving this corridor and stays quiet again
     # after returning to the smaller exit threshold (Schmitt hysteresis).
-    correction_enter_lateral_error: float = 0.16
-    correction_exit_lateral_error: float = 0.07
+    #
+    # The enter threshold is deliberately wide (0.26 m): a small static offset
+    # (robot running straight but ~0.25 m off the lane centre) is NOT a drift,
+    # and penalizing it with the speed ramp cut the sprint from ~4.4 m/s to
+    # ~2.2 m/s for the whole race. Only genuine departures past 0.26 m should
+    # cost speed.
+    correction_enter_lateral_error: float = 0.26
+    correction_exit_lateral_error: float = 0.15
     max_lane_correction_heading_rad: float = 0.10
-    lateral_slow_start: float = 0.08
-    lateral_full_slow: float = 0.32
+    # Gentle speed ramp so a real (but bounded) correction slows the robot only
+    # mildly; full slow-down is reserved for large departures.
+    lateral_slow_start: float = 0.16
+    lateral_full_slow: float = 0.50
     lateral_rate_slow_start_per_s: float = 0.12
     lateral_rate_full_slow_per_s: float = 0.45
     imu_heading_slow_start_rad: float = 0.05
@@ -38,6 +46,9 @@ class LaneFollowerConfig:
     heading_slow_start_rad: float = 0.10
     heading_full_slow_rad: float = 0.35
     steering_slow_start_ratio: float = 0.65
+    # Keep the aggressive floor (0.22 of cruise) so genuine departures still
+    # collapse the sprint into a cautious slow-down; the wide enter threshold
+    # above already keeps small static offsets out of the correction ramp.
     minimum_speed_scale: float = 0.22
     yaw_saturation_ratio: float = 0.92
     yaw_saturation_slow_after_s: float = 0.18
