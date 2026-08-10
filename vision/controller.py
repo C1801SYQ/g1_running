@@ -12,7 +12,10 @@ from .line_detector import DetectionResult
 class LaneFollowerConfig:
     cruise_speed_mps: float = 0.55
     minimum_tracking_speed_mps: float = 0.20
-    lateral_kp: float = 0.65
+    # Strong correction authority: once a real departure is detected, pull back
+    # toward the lane centre hard. The previous 0.65 gain + 0.10 rad heading
+    # limit let a 0.4 m drift grow for ~16 m before the boundary stop kicked in.
+    lateral_kp: float = 1.20
     lateral_kd: float = 0.08
     heading_kp: float = 0.20
     imu_heading_kp: float = 1.20
@@ -34,7 +37,12 @@ class LaneFollowerConfig:
     # cost speed.
     correction_enter_lateral_error: float = 0.26
     correction_exit_lateral_error: float = 0.15
-    max_lane_correction_heading_rad: float = 0.10
+    # Strong correction authority: once a real departure is detected, pull back
+    # toward the lane centre hard. The previous 0.10 rad heading limit and 0.65
+    # lateral gain let a 0.4 m drift grow for ~16 m before the boundary stop
+    # kicked in; with a stronger correction the robot recentres much sooner and
+    # the speed ramp stays mostly inactive.
+    max_lane_correction_heading_rad: float = 0.18
     # Gentle speed ramp so a real (but bounded) correction slows the robot only
     # mildly; full slow-down is reserved for large departures.
     lateral_slow_start: float = 0.16
