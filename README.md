@@ -39,7 +39,7 @@
 │   ├── models/                  # 训练好的策略文件
 │   │   ├── speed_turn/          # ★ 最佳模型 (4.94 m/s)
 │   │   ├── speed_arm/           # 手臂摆动模型 (4.90 m/s)
-│   │   ├── steady_upper_v2/     # ★ 当前最佳 (155200 iter, 视觉循迹+转向强化)
+│   │   ├── steady_upper_v2/     # ★ 当前最佳 (165198 iter, 视觉循迹+静止站姿)
 │   │   └── standrun/            # 站立+跑步模型
 │   └── trajectories/running/    # 跑步步态轨迹库 (1.2~5.0 m/s)
 │
@@ -146,7 +146,8 @@
 | 9 | **`steady_upper_v2`** | 89,996 | 0.0-5.1 | **视觉循迹优化**（续训 steady_upper）：骨盆直立/高度、上半身稳定、速度分段采样、COM/质量/摩擦随机化（出现后仰问题） | 4.94 m/s |
 | 10 | `steady_upper_v2_posture` | 109,995 | 0.0-5.1 | 修复 0 m/s 后仰：移除不对称 standing 轨迹，新增 default_posture 奖励 | 4.92 m/s |
 | 11 | `steady_upper_v2_torso` | 139,994 | 0.0-5.1 | **上肢稳定**（续训）：torso roll-rate + ang-vel 奖励，抑制左右晃动 | 4.92 m/s |
-| 12 | `steady_upper_v2_turn` | 155,200 | 0.0-5.1 | **转向强化**（续训）：rel_heading_envs 40%、rel_closed_loop_yaw 45%、lat_vel↓、yaw_vel↑，增强 yaw 转向 | ★ 当前部署 |
+| 12 | `steady_upper_v2_turn` | 155,200 | 0.0-5.1 | **转向强化**（续训）：rel_heading_envs 40%、rel_closed_loop_yaw 45%、lat_vel↓、yaw_vel↑，增强 yaw 转向 | 4.95 m/s |
+| 13 | `steady_upper_v2_still` | 165,198 | 0.0-5.1 | **0 m/s 关节静止**（续训）：新增 low_speed_joint_stillness 奖励，站立时关节完全静止不漂移 | ★ 当前部署 |
 
 > `steady_upper_v2` 针对视觉循迹做了专项优化：新增 standing 轨迹解决低速/站姿低头（相机看不到白线）、骨盆姿态/高度奖励保持相机前视、上半身稳定惩罚抑制抖动、COM 偏移与摩擦随机化增强平地直线鲁棒性。
 >
@@ -260,7 +261,7 @@ P / LB_X      → 被动模式（急停）
 
 | 文件 | 说明 |
 |------|------|
-| `models/steady_upper_v2/policy.pt` | ★ 当前最佳 29dof 跑步策略（155200 iter, 视觉循迹+转向强化） |
+| `models/steady_upper_v2/policy.pt` | ★ 当前最佳 29dof 跑步策略（165198 iter, 视觉循迹+静止站姿） |
 | `models/steady_upper_v2/policy_parameters.yaml` | 策略参数（观测/动作/KP/KD/默认关节角） |
 | `models/speed_turn/policy.pt` | 速度优先策略 (JIT TorchScript) |
 | `models/speed_turn/policy_parameters.yaml` | 策略参数（观测/动作/KP/KD/默认关节角） |
