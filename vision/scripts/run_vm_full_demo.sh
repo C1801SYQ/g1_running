@@ -78,7 +78,7 @@ python scripts/run_unitree_camera_sim.py \
     --domain-id "${G1_RACE_DOMAIN_ID}" \
     --interface "${G1_RACE_INTERFACE}" \
     --status-port "${STATUS_PORT}" \
-    --skill6-stabilize-seconds "${G1_SKILL6_STABILIZE_SECONDS:-3.2}" \
+    --skill6-stabilize-seconds "${G1_SKILL6_STABILIZE_SECONDS:-0.60}" \
     --camera-fps 30 \
     --depth-fps 10 \
     --viewer-fps 24 \
@@ -89,7 +89,7 @@ python scripts/run_unitree_camera_sim.py \
     --forward-accel "${G1_RACE_ACCEL:-3.00}" \
     --max-yaw-rate "${G1_RACE_MAX_YAW_RATE:-0.35}" \
     --max-yaw-accel "${G1_RACE_MAX_YAW_ACCEL:-1.50}" \
-    --lateral-kp "${G1_RACE_LATERAL_KP:-0.65}" \
+    --lateral-kp "${G1_RACE_LATERAL_KP:-1.20}" \
     --heading-kp "${G1_RACE_HEADING_KP:-0.20}" \
     --imu-heading-kp "${G1_RACE_IMU_HEADING_KP:-1.20}" \
     --error-filter-alpha "${G1_RACE_ERROR_FILTER_ALPHA:-0.32}" \

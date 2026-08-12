@@ -6,10 +6,10 @@
 固定上游版本：
 
 ```text
-commit: 3d029b92687cfd5a679360aa1d6dd41a9e3079f8
-policy version: steady_upper_v2 / model_155199
+commit: 8628f4b5042618d8916ab33161f66205fd05e040
+policy version: gait_v2 / model_175197
 policy: rl_sar/policy/g1/running/policy.pt
-SHA256: a6c0998c38113b2a471839b247b1424aed5d4da1c6609d60cec8f00f6831ff9c
+SHA256: 5de41b2e247d44db8c1378cc32367227482ab911a640366bc1fc563fda153b57
 license: Apache-2.0
 ```
 

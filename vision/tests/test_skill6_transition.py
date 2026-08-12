@@ -128,7 +128,7 @@ class Skill6TransitionTests(unittest.TestCase):
             simulator_source,
         )
         self.assertIn("--startup-support-until-skill6", run_source)
-        self.assertIn("G1_SKILL6_STABILIZE_SECONDS:-3.2", run_source)
+        self.assertIn("G1_SKILL6_STABILIZE_SECONDS:-0.60", run_source)
         self.assertIn("max_camera_reference_samples", simulator_source)
         self.assertIn("G1_RACE_ACCEL:-3.00", run_source)
         self.assertIn("--vision-enable-delay 0.0", run_source)
@@ -136,13 +136,34 @@ class Skill6TransitionTests(unittest.TestCase):
         self.assertIn("G1_VISION_STATUS_PORT", run_source)
         self.assertIn("--max-yaw-rate", run_source)
         self.assertIn("G1_RACE_MAX_YAW_RATE:-0.35", run_source)
-        self.assertIn("G1_RACE_LATERAL_KP:-0.65", run_source)
+        self.assertIn("G1_RACE_LATERAL_KP:-1.20", run_source)
         self.assertIn("G1_RACE_HEADING_KP:-0.20", run_source)
         self.assertIn("G1_RACE_IMU_HEADING_KP:-1.20", run_source)
         self.assertIn("G1_RACE_ERROR_FILTER_ALPHA:-0.32", run_source)
         self.assertIn("G1_VISION_MAX_WZ", run_source)
         self.assertIn("G1_VISION_SPRINT 1", command_source)
         self.assertIn("G1_VISION_STATUS_PORT", command_source)
+
+    def test_auto_start_waits_for_state1_ack_not_fixed_three_seconds(self) -> None:
+        simulator_source = SIM_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("def wait_for_state1", simulator_source)
+        self.assertIn("if not wait_for_state1():", simulator_source)
+        sprint_section = simulator_source.split(
+            "# Default: Skill 6 (sprint100m)", 1
+        )[1].split("# The SDK filters analog triggers", 1)[0]
+        self.assertNotIn("stop.wait(3.0)", sprint_section)
+
+    def test_skill6_announces_mode_only_after_policy_load(self) -> None:
+        fsm_source = FSM_PATH.read_text(encoding="utf-8")
+        skill6 = fsm_source.split(
+            "class RLFSMStateRLVisionSprint100m", 1
+        )[1].split("class RLFSMStateRLVisionWalk0p5m", 1)[0]
+
+        self.assertLess(
+            skill6.index("rl.InitRL(robot_config_path)"),
+            skill6.index("VisionSprintMode::SetEnabled(true)"),
+        )
 
     def test_skill6_clears_stale_policy_targets(self) -> None:
         sdk_path = (

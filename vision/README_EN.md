@@ -16,9 +16,9 @@ A closed-loop 100 m sprint stack for the **29-DoF Unitree G1**, integrating MuJo
 - Refits fragmented boundaries from real pixels near the locked pair and separates common camera shake from lane-shape changes; it never invents a missing second line.
 - Lets the trained policy and G1 IMU hold the straight heading; vision stays neutral inside a center corridor and only applies bounded, hysteretic correction outside it.
 - Adds an isolated **Skill 6** to `rl_sar`: state-1-only entry, lane lock, sprint, timed 100 m crossing, visually guided deceleration, and automatic return to Passive.
-- Uses the upstream `steady_upper_v2` (`model_155199`) policy for Skills 5/6 and verifies its SHA-256 before building.
+- Uses the deployed gait-v2 `model_175197` policy for Skills 5/6 and verifies its SHA-256 before building.
 - Uses averaged full-attitude homography stabilization, lane-lock zero-bias calibration, IMU straight-heading hold, and bounded vision recovery through the 100 m line.
-- Includes watchdog behavior, fall detection, hard adjacent-lane guards, repeatable scene generation, launch scripts, and 55 unit tests.
+- Includes watchdog behavior, fall detection, hard adjacent-lane guards, repeatable scene generation, launch scripts, and 118 unit tests.
 
 ## Simulation Result
 
@@ -32,7 +32,7 @@ A closed-loop 100 m sprint stack for the **29-DoF Unitree G1**, integrating MuJo
 | Full stop position | 100.67–101.88 m |
 | Falls / adjacent-lane switches / identity loss | 0 / 0 / 0 |
 
-These results are two consecutive full-stack runs using the final defaults: `model_155199`, a `0.35 rad/s` yaw-rate limit, `3.00 m/s²` command acceleration, and a 3.2 s Skill-6 settling delay that averages only the final 1 s of attitude. Timing starts after the safety lane lock releases acceleration; it is not an official competition time. Hardware deployment still requires staged low-speed validation.
+The table is a historical pre-optimization baseline and does not claim results for this revision. The current defaults use gait-v2 `model_175197`, a `0.35 rad/s` yaw-rate limit, `3.00 m/s²` command acceleration, event-driven state-1 readiness, and a 0.60 s Skill-6 camera settling window. Timing begins only after lane lock releases acceleration; hardware deployment still requires staged low-speed validation.
 
 ## Architecture
 
@@ -89,7 +89,7 @@ conda activate g1race
 python -m unittest discover -s tests -v
 ```
 
-The 55 tests cover the deployed policy checksum, strict two-line validation, low light and exposure changes, motion blur, full camera-attitude stabilization, immutable adjacent-lane locking, straight-corridor neutrality, correction hysteresis, perception dropout, finish-line braking, scene geometry, and the fast Skill 6 startup handshake.
+The 118 tests cover the deployed policy checksum, strict two-line validation, low light and exposure changes, motion blur, full camera-attitude stabilization, immutable adjacent-lane locking, straight-corridor neutrality, predictive drift confirmation, correction hysteresis, mission reset, perception dropout, finish-line braking, the Skill 7 safety chain, and the event-driven Skill 6 startup handshake.
 
 ## Sim-to-Real Status
 

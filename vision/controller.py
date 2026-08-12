@@ -37,6 +37,13 @@ class LaneFollowerConfig:
     # cost speed.
     correction_enter_lateral_error: float = 0.26
     correction_exit_lateral_error: float = 0.15
+    # A real slow drift should not have to reach the wide static-offset gate.
+    # Enter early only when an offset is already meaningful and keeps moving
+    # outward in one direction for several frames. Gait sway reverses too often
+    # to accumulate this confirmation time.
+    predictive_enter_lateral_error: float = 0.14
+    predictive_outward_rate_per_s: float = 0.055
+    predictive_confirm_s: float = 0.30
     # Strong correction authority: once a real departure is detected, pull back
     # toward the lane centre hard. The previous 0.10 rad heading limit and 0.65
     # lateral gain let a 0.4 m drift grow for ~16 m before the boundary stop
@@ -93,6 +100,8 @@ class LaneFollowerController:
         self._previous_vx = 0.0
         self._yaw_saturation_duration_s = 0.0
         self._correction_direction = 0.0
+        self._outward_drift_direction = 0.0
+        self._outward_drift_duration_s = 0.0
         self._visual_heading_reference_rad = 0.0
         self._last_time: float | None = None
         self._last_valid_time: float | None = None
@@ -106,6 +115,8 @@ class LaneFollowerController:
         self._previous_vx = 0.0
         self._yaw_saturation_duration_s = 0.0
         self._correction_direction = 0.0
+        self._outward_drift_direction = 0.0
+        self._outward_drift_duration_s = 0.0
         self._visual_heading_reference_rad = 0.0
         self._last_time = None
         self._last_valid_time = None
@@ -359,7 +370,7 @@ class LaneFollowerController:
             + 0.82 * self._filtered_lateral_rate
         )
         self._previous_lateral = self._filtered_lateral
-        self._update_correction_mode()
+        self._update_correction_mode(dt)
         self._update_filtered_heading(
             result,
             dt,
@@ -426,16 +437,52 @@ class LaneFollowerController:
             )
         )
 
-    def _update_correction_mode(self) -> None:
+    def _update_correction_mode(self, dt: float) -> None:
         magnitude = abs(self._filtered_lateral)
         if self._correction_direction == 0.0:
             if magnitude >= self.config.correction_enter_lateral_error:
                 self._correction_direction = float(
                     np.sign(self._filtered_lateral)
                 )
+                self._clear_outward_drift_confirmation()
+                return
+
+            direction = float(np.sign(self._filtered_lateral))
+            outward_rate = direction * self._filtered_lateral_rate
+            predictive = (
+                direction != 0.0
+                and magnitude >= self.config.predictive_enter_lateral_error
+                and outward_rate
+                >= self.config.predictive_outward_rate_per_s
+            )
+            if predictive:
+                if direction != self._outward_drift_direction:
+                    self._outward_drift_direction = direction
+                    self._outward_drift_duration_s = 0.0
+                self._outward_drift_duration_s += dt
+                if (
+                    self._outward_drift_duration_s
+                    >= self.config.predictive_confirm_s
+                ):
+                    self._correction_direction = direction
+                    self._clear_outward_drift_confirmation()
+            else:
+                # Decay faster than evidence accumulates so alternating gait
+                # sway cannot stitch unrelated half-cycles into a correction.
+                self._outward_drift_duration_s = max(
+                    0.0,
+                    self._outward_drift_duration_s - 2.0 * dt,
+                )
+                if self._outward_drift_duration_s == 0.0:
+                    self._outward_drift_direction = 0.0
             return
         if magnitude <= self.config.correction_exit_lateral_error:
             self._correction_direction = 0.0
+            self._clear_outward_drift_confirmation()
+
+    def _clear_outward_drift_confirmation(self) -> None:
+        self._outward_drift_direction = 0.0
+        self._outward_drift_duration_s = 0.0
 
     def _update_filtered_heading(
         self,

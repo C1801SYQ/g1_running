@@ -201,7 +201,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skill6-stabilize-seconds",
         type=float,
-        default=3.2,
+        default=0.60,
         help=(
             "Short camera/IMU sampling window after Skill 6 entry before "
             "locking the starting lane."
@@ -1368,6 +1368,22 @@ def main() -> None:
             bridge.low_state.wireless_remote[2] = byte2
             bridge.low_state.wireless_remote[3] = byte3
 
+        def wait_for_state1(timeout_s: float = 8.0) -> bool:
+            """Wait for the post-InitRL state-1 acknowledgement."""
+
+            deadline = time.monotonic() + timeout_s
+            while not state1_entered.is_set():
+                if stop.wait(0.02):
+                    return False
+                if time.monotonic() >= deadline:
+                    print(
+                        "[policy] state 1 acknowledgement timed out; "
+                        "mission button not sent",
+                        flush=True,
+                    )
+                    return False
+            return True
+
         # Unitree remote byte layout:
         # byte 2: [reserved, reserved, LT, RT, select, start, LB, RB]
         # byte 3: [left, down, right, up, Y, X, B, A]
@@ -1394,9 +1410,12 @@ def main() -> None:
                 return
             set_buttons(0, 0)
 
+            if not wait_for_state1():
+                return
+
             if args.auto_start_mission == "walk0p5m":
                 # Let the locomotion policy stand stably before Num7.
-                if stop.wait(3.0):
+                if stop.wait(0.50):
                     return
                 # Num7 = LB + DPadLeft -> RLFSMStateRLVisionWalk0p5m.
                 print("[policy] sending LB+Left -> Num7 (walk0p5m)", flush=True)
@@ -1407,10 +1426,9 @@ def main() -> None:
                 return
 
             # Default: Skill 6 (sprint100m). Num6 = LB + DPadDown.
-            # State 1 loads its policy asynchronously; give it the same stable
-            # standing window as Num7 so the Num6 edge cannot arrive while the
-            # previous FSM transition is still being processed.
-            if stop.wait(3.0):
+            # State 1 has acknowledged completion of InitRL above. Only a short
+            # input-edge guard is needed before Num6.
+            if stop.wait(0.20):
                 return
             print("[policy] sending LB+Down -> Num6 (sprint100m)", flush=True)
             set_buttons(0b00000010, 0b00100000)

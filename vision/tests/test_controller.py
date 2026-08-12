@@ -68,6 +68,61 @@ class LaneFollowerControllerTest(unittest.TestCase):
         self.assertLessEqual(crossed.wz, 0.0)
         self.assertGreater(left.wz, 0.0)
 
+    def test_sustained_outward_drift_enters_before_wide_static_gate(self):
+        controller = LaneFollowerController(
+            LaneFollowerConfig(
+                max_forward_accel_mps2=20.0,
+                max_yaw_accel_rps2=20.0,
+            )
+        )
+        commands = []
+        for index in range(50):
+            lateral = min(0.24, 0.10 + 0.004 * index)
+            commands.append(
+                controller.update(
+                    DetectionResult(
+                        valid=True,
+                        lateral_error=lateral,
+                        confidence=1.0,
+                    ),
+                    now=0.05 * index,
+                    heading_hold_error_rad=0.0,
+                )
+            )
+
+        first_correction = next(
+            index
+            for index, command in enumerate(commands)
+            if command.wz < 0.0
+        )
+        self.assertLess(
+            0.10 + 0.004 * first_correction,
+            controller.config.correction_enter_lateral_error,
+        )
+
+    def test_alternating_outward_rate_does_not_confirm_drift(self):
+        controller = LaneFollowerController(
+            LaneFollowerConfig(
+                max_forward_accel_mps2=20.0,
+                max_yaw_accel_rps2=20.0,
+            )
+        )
+        commands = []
+        for index in range(80):
+            commands.append(
+                controller.update(
+                    DetectionResult(
+                        valid=True,
+                        lateral_error=0.20 if index % 2 else -0.20,
+                        confidence=1.0,
+                    ),
+                    now=0.05 * index,
+                    heading_hold_error_rad=0.0,
+                )
+            )
+
+        self.assertLess(max(abs(command.wz) for command in commands), 1e-9)
+
     def test_lane_to_right_commands_right_turn(self):
         controller = LaneFollowerController()
         result = DetectionResult(

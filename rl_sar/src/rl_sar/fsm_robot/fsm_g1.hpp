@@ -582,8 +582,6 @@ public:
         rl.control.x = 0.0f;
         rl.control.y = 0.0f;
         rl.control.yaw = 0.0f;
-        VisionSprintMode::SetEnabled(true);
-
         // Skill 6 deliberately reuses GitHub Skill 5's trained running
         // policy. Only the visual command source and race lifecycle differ.
         rl.config_name = "running";
@@ -593,6 +591,10 @@ public:
         {
             rl.InitRL(robot_config_path);
             rl.now_state = *fsm_state;
+            // Announce Skill 6 only after the running model is fully loaded.
+            // Python can then use a short camera settling window instead of
+            // hiding model-load time behind another fixed multi-second wait.
+            VisionSprintMode::SetEnabled(true);
             std::cout << LOGGER::NOTE
                       << "Skill 6 entered: visual 100 m sprint"
                       << std::endl;
