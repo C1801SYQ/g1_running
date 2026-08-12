@@ -1,5 +1,49 @@
 from __future__ import annotations
 
+from typing import Protocol
+
+
+class Resettable(Protocol):
+    def reset(self) -> None: ...
+
+
+class ActivatableGate(Protocol):
+    @property
+    def active(self) -> bool: ...
+
+    def activate(self, now: float | None = None) -> None: ...
+
+    def deactivate(self) -> None: ...
+
+
+def apply_num7_mode_transition(
+    current_mode: str,
+    detector: Resettable,
+    controller: Resettable,
+    gate: ActivatableGate,
+    *,
+    now: float,
+) -> str | None:
+    """Apply one effective Num7 mode edge on the camera-owner thread.
+
+    Returns ``"enabled"`` or ``"disabled"`` when a lifecycle transition was
+    applied, otherwise ``None``. Repeated enable heartbeats are idempotent so
+    they cannot erase the lane anchor or restart the distance timer.
+    """
+
+    if current_mode == "WALK0P5M":
+        if gate.active:
+            return None
+        detector.reset()
+        controller.reset()
+        gate.activate(now=now)
+        return "enabled"
+
+    if gate.active:
+        gate.deactivate()
+        return "disabled"
+    return None
+
 
 def mujoco_state_was_reset(
     previous_time: float | None,

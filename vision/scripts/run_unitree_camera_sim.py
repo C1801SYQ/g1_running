@@ -491,7 +491,7 @@ def main() -> None:
             max_forward_accel_mps2=0.20,
             max_forward_decel_mps2=1.20,
             max_yaw_accel_rps2=0.50,
-            lateral_kp=0.65,
+            lateral_kp=1.20,
             heading_kp=0.20,
             imu_heading_kp=1.20,
             error_filter_alpha=0.32,
@@ -982,6 +982,16 @@ def main() -> None:
                 last_sim_time = current_sim_time
                 last_pelvis_x = current_pelvis_x
                 if mode_walk and not num7_enabled.is_set():
+                    # Num7 owns a fresh immutable lane identity per mission.
+                    # The detector may have observed state-1 frames before the
+                    # button edge, so reset and re-detect this exact frame
+                    # before allowing the first lock. The next 500 ms status
+                    # heartbeat does not enter this edge-only branch.
+                    detector.reset()
+                    num7_controller.reset()
+                    result = detector.detect(
+                        rgb, last_depth_m if render_depth else None
+                    )
                     num7_enabled.set()
                     walk0p5m_gate.activate(now=now)
                     num7_last_lock_time = None

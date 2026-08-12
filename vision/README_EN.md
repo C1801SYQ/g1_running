@@ -18,7 +18,7 @@ A closed-loop 100 m sprint stack for the **29-DoF Unitree G1**, integrating MuJo
 - Adds an isolated **Skill 6** to `rl_sar`: state-1-only entry, lane lock, sprint, timed 100 m crossing, visually guided deceleration, and automatic return to Passive.
 - Uses the deployed gait-v2 `model_175197` policy for Skills 5/6 and verifies its SHA-256 before building.
 - Uses averaged full-attitude homography stabilization, lane-lock zero-bias calibration, IMU straight-heading hold, and bounded vision recovery through the 100 m line.
-- Includes watchdog behavior, fall detection, hard adjacent-lane guards, repeatable scene generation, launch scripts, and 118 unit tests.
+- Includes watchdog behavior, fall detection, hard adjacent-lane guards, repeatable scene generation, launch scripts, and 125 unit tests.
 
 ## Simulation Result
 
@@ -89,7 +89,9 @@ conda activate g1race
 python -m unittest discover -s tests -v
 ```
 
-The 118 tests cover the deployed policy checksum, strict two-line validation, low light and exposure changes, motion blur, full camera-attitude stabilization, immutable adjacent-lane locking, straight-corridor neutrality, predictive drift confirmation, correction hysteresis, mission reset, perception dropout, finish-line braking, the Skill 7 safety chain, and the event-driven Skill 6 startup handshake.
+The 125 tests cover the deployed policy checksum, strict two-line validation, low light and exposure changes, motion blur, full camera-attitude stabilization, immutable adjacent-lane locking, straight-corridor neutrality, predictive drift confirmation, correction hysteresis, mission reset, perception dropout, finish-line braking, the Skill 7 detector lifecycle and safety chain, and the event-driven Skill 6 startup handshake.
+
+For Skill 7, every real `NONE -> WALK0P5M` edge resets the detector, controller, and distance gate on the camera-callback thread. This clears a prior mission's latched lane-identity loss without allowing the 500 ms heartbeat to reset the immutable lane anchor during the current mission. The simulation support fade is 0.60 s, safely below the 2.0 s first-forward-command timeout.
 
 ## Sim-to-Real Status
 

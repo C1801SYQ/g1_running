@@ -98,7 +98,7 @@ python scripts/run_unitree_camera_sim.py \
     --num7-max-duration-s "${G1_NUM7_MAX_DURATION_S:-7.0}" \
     --num7-distance-scale "${G1_NUM7_DISTANCE_SCALE:-0.80}" \
     --startup-support-seconds 16.0 \
-    --startup-support-fade-seconds 3.0 \
+    --startup-support-fade-seconds 0.60 \
     --startup-support-until-mission \
     --fall-height 0.45 \
     --fall-confirm-seconds 0.60 &

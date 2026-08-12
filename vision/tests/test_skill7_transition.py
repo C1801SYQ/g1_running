@@ -184,6 +184,41 @@ class Skill7TransitionTests(unittest.TestCase):
             skill6.read_text(encoding="utf-8"),
         )
 
+    def test_num7_resets_detector_and_controller_on_each_rising_edge(self) -> None:
+        """A previous lane-identity loss must not poison the next mission."""
+        sim = SIM_SCRIPT_PATH.read_text(encoding="utf-8")
+        entry = sim.split(
+            "if mode_walk and not num7_enabled.is_set():", 1
+        )[1].split("elif not mode_walk", 1)[0]
+        self.assertIn("detector.reset()", entry)
+        self.assertIn("num7_controller.reset()", entry)
+        self.assertIn("result = detector.detect(", entry)
+
+        real = (VISION_ROOT / "scripts/run_realsense_ros2.py").read_text(
+            encoding="utf-8"
+        )
+        lifecycle = real.split(
+            "def _apply_pending_num7_transitions", 1
+        )[1].split("def on_depth", 1)[0]
+        self.assertIn("apply_num7_mode_transition(", lifecycle)
+        self.assertIn("self._mode_events.put(current_mode)", real)
+
+    def test_num7_startup_restraint_fades_before_start_timeout(self) -> None:
+        source = NUM7_SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("--startup-support-fade-seconds 0.60", source)
+        self.assertIn('G1_NUM7_START_TIMEOUT_S:-2.0', source)
+
+    def test_num7_uses_straight_first_predictive_controller(self) -> None:
+        sim = SIM_SCRIPT_PATH.read_text(encoding="utf-8")
+        num7 = sim.split("num7_controller = LaneFollowerController", 1)[1]
+        num7 = num7.split("sender = UdpCommandSender", 1)[0]
+        self.assertIn("lateral_kp=1.20", num7)
+
+        real = (VISION_ROOT / "scripts/run_realsense_ros2.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("lateral_kp=1.20", real)
+
     def test_num7_post_stop_report_present(self) -> None:
         """The sim must report commanded vs actual displacement, slide after
         stop, and residual restraint force."""

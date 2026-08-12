@@ -4,15 +4,15 @@
 
 本目录保存 2026-08-12 在 G1 + D435i 上采集的现场证据。当前 Skill 7
 代码可以完成状态握手、白线控制命令输出、深度安全、UDP watchdog 和 1 m
-开环停止，但真机视觉还存在一个必须优先修复的生命周期问题：
+开环停止。现场采集时还存在一个必须优先修复的生命周期问题：
 
-> `run_realsense_ros2.py` 在 Num7 再次激活时重置了 controller 和距离 gate，
-> 但没有重置 `WhiteLaneDetector`。一旦 detector 锁存
-> `lane-identity-lost`，后续 Num7 任务即使画面已经满足双白线检测条件，常驻
-> 节点仍会持续输出 `LOST` 和零速度。
+> 审计时的 `run_realsense_ros2.py` 在 Num7 再次激活时重置了 controller 和距离
+> gate，但没有重置 `WhiteLaneDetector`。该问题现已修复：状态线程只排队模式
+> 边沿，由相机回调线程在每次真实上升沿同步重置 detector、controller 和距离 gate；
+> 500 ms 心跳不会重复重置。
 
-这份提交同步当前 Skill 7 实现和现场证据，但**没有直接修改视觉算法**。
-在完成本文 P0 优化及真机回归前，不应把当前版本标记为视觉真机验收完成。
+本目录继续保留修复前的现场证据用于回归对照。生命周期 P0 已完成代码和单元测试，
+但在完成真机图像回放及吊起验证前，仍不应把当前版本标记为视觉真机验收完成。
 
 ## 现场运行现象
 
@@ -118,18 +118,18 @@ result:
 
 ## 需要完成的视觉优化
 
-### P0：修复 Num7 detector 生命周期
+### P0（已完成代码修复）：Num7 detector 生命周期
 
 涉及位置：`vision/scripts/run_realsense_ros2.py::_status_loop`。
 
-当前 `NONE -> WALK0P5M` 只执行：
+旧版 `NONE -> WALK0P5M` 只执行：
 
 ```python
 self.walk_gate.activate(...)
 self.controller.reset()
 ```
 
-需要把 detector 当作同一个任务会话的状态机管理：
+当前已把 detector 当作同一个任务会话的状态机管理：
 
 1. 只在一次真实的 `NONE -> WALK0P5M` 上升沿重置 detector。
 2. 同时重置 controller、距离 gate、lane anchor、boundary breach counter、
@@ -222,17 +222,16 @@ stop 延迟。安全相关测试应坚持“错误时停”，不能为了提高
 
 ## 建议实施顺序
 
-1. 完成 P0 detector 生命周期修复和并发安全测试。
+1. 用本目录图片做离线回放，确认第二次 Num7 能重新锁线。
 2. 增加视觉 ready 握手和具体 stop reason。
-3. 用本目录图片做离线回放，确认第二次 Num7 能重新锁线。
-4. 吊起机器人进行两次连续 Num7，仅验证命令产生与停止，不落地。
-5. 完成相机安装标定和边缘截断几何优化。
-6. 依次进行 0.10 m、0.25 m、0.50 m、1.00 m 地面测试并人工测量。
+3. 吊起机器人进行两次连续 Num7，仅验证命令产生与停止，不落地。
+4. 完成相机安装标定和边缘截断几何优化。
+5. 依次进行 0.10 m、0.25 m、0.50 m、1.00 m 地面测试并人工测量。
 
 ## 当前安全边界
 
 - 1 m 停止仍是速度命令积分乘 `distance_scale`，不是可靠里程计闭环。
 - `control_transfer returned error: Resource temporarily unavailable` 在现场仍偶发；
   15 FPS 配置下未观察到本轮 streamer watchdog，但应继续记录 USB 稳定性。
-- 当前证据支持“深度安全正常、分割可用、生命周期有缺陷”，不支持直接放宽所有
-  白线几何门限。
+- 修复前证据支持“深度安全正常、分割可用、生命周期曾有缺陷”；修复后的真机回归
+  尚未完成，因此仍不支持直接放宽所有白线几何门限。

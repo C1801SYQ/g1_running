@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import queue
 import sys
 import threading
 import time
@@ -26,6 +27,7 @@ from g1_race_vision.depth_safety import (
     DepthSafetyResult,
 )
 from g1_race_vision.line_detector import LaneDetectorConfig, WhiteLaneDetector
+from g1_race_vision.mission_lifecycle import apply_num7_mode_transition
 from g1_race_vision.udp_command import (
     UdpVisionStatusReceiver,
     VisionMode,
@@ -153,7 +155,7 @@ class RealSenseLaneFollower(Node):
                     max_forward_accel_mps2=0.20,
                     max_forward_decel_mps2=1.20,
                     max_yaw_accel_rps2=0.50,
-                    lateral_kp=0.65,
+                    lateral_kp=1.20,
                     heading_kp=0.20,
                     imu_heading_kp=1.20,
                     error_filter_alpha=0.32,
@@ -212,6 +214,11 @@ class RealSenseLaneFollower(Node):
         self.latest_depth_m: np.ndarray | None = None
         self.latest_depth_time = 0.0
         self.latest_safety = self.depth_safety.evaluate(None, float("inf"))
+        # The UDP listener runs on a background thread, while the detector,
+        # controller and distance gate are owned by the ROS image callback.
+        # Queue mode edges instead of mutating those state machines from both
+        # threads. This also preserves a fast WALK -> NONE -> WALK sequence.
+        self._mode_events: queue.SimpleQueue[str] = queue.SimpleQueue()
 
         self.create_subscription(
             Image, depth_topic, self.on_depth, qos_profile_sensor_data
@@ -278,7 +285,7 @@ class RealSenseLaneFollower(Node):
             )
 
     def _status_loop(self) -> None:
-        """Polls the FSM status port and drives the Num7 gate lifecycle."""
+        """Poll the FSM status port and queue lifecycle edges for ROS."""
         while not self._status_stop.is_set():
             try:
                 transitions = self.status_receiver.poll_events()
@@ -289,31 +296,40 @@ class RealSenseLaneFollower(Node):
                 break
             if self.mission == "walk0p5m":
                 for current_mode in transitions:
-                    if current_mode == VisionMode.WALK0P5M:
-                        self.walk_gate.activate(now=time.monotonic())
-                        self.controller.reset()
-                        self.get_logger().warning(
-                            "Num7 FSM enable received; mission timer started"
-                        )
-                    elif self.walk_gate.active:
-                        self.walk_gate.deactivate()
-                        self.get_logger().warning(
-                            "Num7 FSM disable received; gate inactive"
-                        )
-                # Heartbeats do not create transitions. If this node started
-                # after the original enable, arm from the receiver's state.
-                if (
-                    self.status_receiver.mode == VisionMode.WALK0P5M
-                    and not self.walk_gate.active
-                ):
-                    if not self.walk_gate.active:
-                        self.walk_gate.activate(now=time.monotonic())
-                        self.controller.reset()
-                        self.get_logger().warning(
-                            "Num7 FSM enable received; mission timer started"
-                        )
+                    self._mode_events.put(current_mode)
             # Wake up ~10 Hz to keep up with the C++ heartbeat.
             self._status_stop.wait(0.10)
+
+    def _apply_pending_num7_transitions(self, now: float) -> None:
+        """Apply every queued FSM edge on the image-callback thread.
+
+        A genuine Num7 rising edge starts a brand-new lane identity. Repeated
+        500 ms enable heartbeats are filtered by ``poll_events`` and therefore
+        cannot reset the immutable lane anchor during a mission.
+        """
+
+        while True:
+            try:
+                current_mode = self._mode_events.get_nowait()
+            except queue.Empty:
+                return
+
+            transition = apply_num7_mode_transition(
+                current_mode,
+                self.detector,
+                self.controller,
+                self.walk_gate,
+                now=now,
+            )
+            if transition == "enabled":
+                self.get_logger().warning(
+                    "Num7 FSM enable received; detector identity reset and "
+                    "mission timer started"
+                )
+            elif transition == "disabled":
+                self.get_logger().warning(
+                    "Num7 FSM disable received; gate inactive"
+                )
 
     def on_depth(self, message: Image) -> None:
         depth = self.bridge.imgmsg_to_cv2(
@@ -326,6 +342,10 @@ class RealSenseLaneFollower(Node):
         self.latest_depth_time = time.monotonic()
 
     def on_color(self, message: Image) -> None:
+        now = time.monotonic()
+        if self.mission == "walk0p5m":
+            self._apply_pending_num7_transitions(now)
+
         rgb = self.bridge.imgmsg_to_cv2(message, desired_encoding="rgb8")
         max_age = float(self.get_parameter("max_depth_age_s").value)
         depth_age = time.monotonic() - self.latest_depth_time
@@ -345,7 +365,7 @@ class RealSenseLaneFollower(Node):
             )
             if self.latest_safety.motion_allowed:
                 safe_command = self.walk_gate.update(
-                    desired_command, now=time.monotonic()
+                    desired_command, now=now
                 )
             else:
                 safe_command = ControllerCommand(
