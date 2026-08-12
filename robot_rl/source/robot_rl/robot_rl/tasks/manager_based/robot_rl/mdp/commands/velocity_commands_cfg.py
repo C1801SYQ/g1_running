@@ -31,7 +31,12 @@ class VelocityTrackingCommandCfg(UniformVelocityCommandCfg):
 
     rel_standing_envs: float = MISSING
 
-    max_acc: float = 100.0
+    max_acc: float | tuple[float, float, float] = 100.0
+    """Per-axis command slew-rate limit ``(vx, vy, yaw)``.
+
+    A scalar applies the same limit to all axes. A finite limit lets the policy
+    learn stand-to-run transitions instead of seeing discontinuous commands.
+    """
 
     lin_vel_x_segments: tuple[tuple[float, float], ...] | None = None
     """Optional equal-weight segments for sampling x-velocity.

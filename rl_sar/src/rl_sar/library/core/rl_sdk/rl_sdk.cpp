@@ -238,6 +238,14 @@ void RL::InitRL(std::string robot_config_path)
 {
     std::lock_guard<std::mutex> lock(this->model_mutex);
 
+    // A policy switch must never consume targets produced by the previous
+    // model. They otherwise survive in the concurrent queues and create a
+    // one-frame whole-body jump after the transition hold completes.
+    std::vector<float> stale_output;
+    while (this->output_dof_pos_queue.try_pop(stale_output)) {}
+    while (this->output_dof_vel_queue.try_pop(stale_output)) {}
+    while (this->output_dof_tau_queue.try_pop(stale_output)) {}
+
     this->ReadYaml(robot_config_path, "config.yaml");
 
     // init joint num first

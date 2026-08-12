@@ -32,6 +32,7 @@ from g1_race_vision.line_detector import (
     DetectionResult,
     WhiteLaneDetector,
 )
+from g1_race_vision.mission_lifecycle import mujoco_state_was_reset
 from g1_race_vision.rendering import (
     MujocoRgbdRenderer,
     average_rotation_matrices,
@@ -718,11 +719,6 @@ def main() -> None:
         assert viewer is not None
         period = 1.0 / args.viewer_fps
         while is_running():
-            if args.keep_open_after_finish and race_finished.is_set():
-                # The window server keeps the last frame. Avoid spending GPU
-                # time redrawing an identical finished pose.
-                time.sleep(0.20)
-                continue
             with lock:
                 viewer.cam.lookat[:] = data.xpos[support_body_id]
                 viewer.sync()
@@ -763,6 +759,56 @@ def main() -> None:
         num7_slide_reported = False
         _num7_prev_frame_time: float | None = None
         num7_post_stop_pending: list[dict[str, float]] = []
+        last_sim_time: float | None = None
+        last_pelvis_x: float | None = None
+
+        def _reset_sprint_mission(
+            *,
+            now: float,
+            enabled: bool,
+            reason: str,
+            preserve_finished_hold: bool = False,
+        ) -> None:
+            """Reset every latch owned by one Skill 6 race."""
+
+            nonlocal vision_enabled, skill6_ready_at
+            nonlocal saved_lock_debug, saved_first_loss_debug
+            nonlocal camera_reference_xmat
+
+            vision_enabled = False
+            skill6_ready_at = (
+                now + max(0.0, args.skill6_stabilize_seconds)
+                if enabled
+                else None
+            )
+            camera_reference_xmat = None
+            camera_reference_samples.clear()
+            saved_lock_debug = False
+            saved_first_loss_debug = False
+            detector.reset()
+            controller.reset()
+            lane_lock_acquired.clear()
+            finish_line_crossed.clear()
+            race_finished.clear()
+            if preserve_finished_hold:
+                race_finished.set()
+            with lock:
+                race_timing.update(
+                    started_at=None,
+                    start_x=None,
+                    heading_yaw=None,
+                )
+                race_stats.update(
+                    frames=0,
+                    valid_frames=0,
+                    max_abs_y=0.0,
+                    max_command_vx=0.0,
+                )
+            if enabled:
+                skill6_enabled.set()
+            else:
+                skill6_enabled.clear()
+            print(f"[vision] Skill 6 mission reset: {reason}", flush=True)
 
         def _num7_step(
             result: DetectionResult,
@@ -819,11 +865,6 @@ def main() -> None:
                 cv2.resizeWindow(DEBUG_WINDOW_NAME, 1050, 790)
                 cv2.moveWindow(DEBUG_WINDOW_NAME, 1130, 60)
             while is_running():
-                if args.keep_open_after_finish and race_finished.is_set():
-                    # Keep the last RGB-D dashboard visible without rendering
-                    # another 30 frames every second after the race is over.
-                    time.sleep(0.20)
-                    continue
                 started = time.perf_counter()
                 render_depth = (
                     args.use_depth and time.monotonic() >= next_depth
@@ -896,26 +937,50 @@ def main() -> None:
                 mode_sprint = current_mode == VisionMode.SPRINT100M
                 mode_walk = current_mode == VisionMode.WALK0P5M
                 if mode_sprint and not skill6_enabled.is_set():
-                    skill6_enabled.set()
-                    camera_reference_xmat = None
-                    camera_reference_samples.clear()
-                    skill6_ready_at = now + max(
-                        0.0, args.skill6_stabilize_seconds
+                    _reset_sprint_mission(
+                        now=now,
+                        enabled=True,
+                        reason="SPRINT100M entered",
                     )
                     print(
                         "[vision] C++ FSM confirmed visual sprint mode; "
                         "waiting for final-height lane lock",
                         flush=True,
                     )
-                elif (
-                    not mode_sprint
-                    and skill6_enabled.is_set()
-                    and not vision_enabled
+                elif not mode_sprint and skill6_enabled.is_set():
+                    _reset_sprint_mission(
+                        now=now,
+                        enabled=False,
+                        reason="SPRINT100M exited",
+                        preserve_finished_hold=race_finished.is_set(),
+                    )
+                with lock:
+                    current_sim_time = float(data.time)
+                    current_pelvis_x = float(data.qpos[0])
+                if (
+                    mujoco_state_was_reset(
+                        last_sim_time,
+                        current_sim_time,
+                        last_pelvis_x,
+                        current_pelvis_x,
+                    )
+                    and (
+                        skill6_enabled.is_set()
+                        or vision_enabled
+                        or race_finished.is_set()
+                    )
                 ):
-                    skill6_enabled.clear()
-                    skill6_ready_at = None
-                    camera_reference_xmat = None
-                    camera_reference_samples.clear()
+                    _reset_sprint_mission(
+                        now=now,
+                        enabled=mode_sprint,
+                        reason=(
+                            "MuJoCo state reset detected "
+                            f"(time {last_sim_time:.2f}->{current_sim_time:.2f}, "
+                            f"x {last_pelvis_x:.2f}->{current_pelvis_x:.2f})"
+                        ),
+                    )
+                last_sim_time = current_sim_time
+                last_pelvis_x = current_pelvis_x
                 if mode_walk and not num7_enabled.is_set():
                     num7_enabled.set()
                     walk0p5m_gate.activate(now=now)
@@ -1342,6 +1407,11 @@ def main() -> None:
                 return
 
             # Default: Skill 6 (sprint100m). Num6 = LB + DPadDown.
+            # State 1 loads its policy asynchronously; give it the same stable
+            # standing window as Num7 so the Num6 edge cannot arrive while the
+            # previous FSM transition is still being processed.
+            if stop.wait(3.0):
+                return
             print("[policy] sending LB+Down -> Num6 (sprint100m)", flush=True)
             set_buttons(0b00000010, 0b00100000)
             if stop.wait(0.15):

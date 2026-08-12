@@ -84,7 +84,7 @@ python scripts/run_unitree_camera_sim.py \
     --viewer-fps 24 \
     --debug-fps 5 \
     --show-debug \
-    --debug-snapshot "${HOME}/g1_camera_dashboard_latest.png" \
+    --debug-snapshot "${PROJECT_ROOT}/debug_output/g1_camera_dashboard_latest.png" \
     --speed "${G1_RACE_SPEED:-5.10}" \
     --forward-accel "${G1_RACE_ACCEL:-3.00}" \
     --max-yaw-rate "${G1_RACE_MAX_YAW_RATE:-0.35}" \

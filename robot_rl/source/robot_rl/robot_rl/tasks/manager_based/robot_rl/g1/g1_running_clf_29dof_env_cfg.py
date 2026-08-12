@@ -191,10 +191,11 @@ class G1Running29dofCommandsCfg(HumanoidCommandsCfg):
     base_velocity = VelocityTrackingCommandCfg(
         asset_name="robot",
         resampling_time_range=(7.0, 10.0),
-        rel_standing_envs=0.0,
-        rel_closed_loop=0.35,
-        rel_closed_loop_yaw=0.45,
-        rel_open_loop=0.20,
+        rel_standing_envs=0.15,
+        rel_closed_loop=0.30,
+        rel_closed_loop_yaw=0.40,
+        rel_open_loop=0.15,
+        max_acc=(3.0, 3.0, 4.0),
         heading_command=True,       # Enable heading commands
         rel_heading_envs=0.4,       # 40% envs practice turning/heading (was 20%)
         debug_vis=False,
@@ -227,7 +228,10 @@ TORS_ROLL_RATE_WEIGHT = 3.0   # Penalize torso roll rate (lateral sway) for visi
 TORS_ANG_VEL_WEIGHT = 0.05    # Linear penalty on torso angular velocity magnitude
 PELVIS_HEIGHT_WEIGHT = 3.0    # Keep pelvis at nominal running height (anti-crouch)
 LOW_SPEED_UPRIGHT_WEIGHT = 3.0  # Upright posture enforced at low speed / standing
-LOW_SPEED_STILL_WEIGHT = 3.0     # Joints fully still at low / zero speed (no drift)
+LOW_SPEED_STILL_WEIGHT = 3.0     # Motionless joints only in true standing envs
+LOW_SPEED_HIP_ROLL_WEIGHT = 1.5  # Nominal symmetric hip roll while standing
+SLOW_SPEED_HIP_YAW_WEIGHT = 2.0  # Forward-facing feet in the 0.3-1.5 m/s band
+STRAIGHT_LINE_WEIGHT = 2.0       # Straight running at speed (fewer vision corrections)
 
 
 @configclass
@@ -322,7 +326,7 @@ class G1Running29dofRewardCfg(G1TrajOptCLFRewards):
         weight=LOW_SPEED_UPRIGHT_WEIGHT,
         params={
             "command_name": "base_velocity",
-            "speed_threshold": 0.5,
+            "speed_threshold": 0.3,
             "body_names": "pelvis_link",
             "roll_std": 0.15,
             "pitch_std": 0.15,
@@ -337,7 +341,7 @@ class G1Running29dofRewardCfg(G1TrajOptCLFRewards):
         weight=4.0,
         params={
             "command_name": "base_velocity",
-            "speed_threshold": 0.5,
+            "speed_threshold": 0.3,
             "std": 0.25,
         },
     )
@@ -349,22 +353,63 @@ class G1Running29dofRewardCfg(G1TrajOptCLFRewards):
         weight=LOW_SPEED_STILL_WEIGHT,
         params={
             "command_name": "base_velocity",
-            "speed_threshold": 0.5,
+            "speed_threshold": 0.3,
             "joint_vel_std": 0.15,
             "joint_acc_std": 0.5,
         },
     )
 
+    # Keep the legs in the asset's symmetric nominal stance at exactly 0 m/s.
+    low_speed_hip_roll = RewTerm(
+        func=mdp.low_speed_hip_roll_reward,
+        weight=LOW_SPEED_HIP_ROLL_WEIGHT,
+        params={
+            "command_name": "base_velocity",
+            "speed_threshold": 0.3,
+            "roll_std": 0.12,
+        },
+    )
+
+    # Prevent the visibly inward-toed gait around 1 m/s without constraining
+    # turns, lateral recovery, standing, or the high-speed sprint gait.
+    slow_speed_hip_yaw = RewTerm(
+        func=mdp.slow_speed_hip_yaw_reward,
+        weight=SLOW_SPEED_HIP_YAW_WEIGHT,
+        params={
+            "command_name": "base_velocity",
+            "min_speed": 0.3,
+            "max_speed": 1.5,
+            "lateral_command_threshold": 0.12,
+            "yaw_command_threshold": 0.12,
+            "yaw_std": 0.14,
+        },
+    )
+
     if TRACKING_REW_TYPE == "GOAL" or TRACKING_REW_TYPE == "GOAL_ADJ":
-        xy_vel = RewTerm(func=mdp.track_lin_vel_xy_exp, weight=10.0,
+        xy_vel = RewTerm(func=mdp.track_lin_vel_xy_exp, weight=12.0,
                          params={"command_name": "base_velocity", "std": 0.5})
-        yaw_vel = RewTerm(func=mdp.track_ang_vel_z_exp, weight=12.0,
+        yaw_vel = RewTerm(func=mdp.track_ang_vel_z_exp, weight=14.0,
                           params={"command_name": "base_velocity", "std": 0.5})
         # Stronger yaw tracking so the robot turns by rotating instead of drifting
         # laterally. Lateral velocity is de-emphasized (1.0) to force yaw steering;
         # straight-line forward tracking (xy_vel=10) stays the top priority.
-        lat_vel = RewTerm(func=mdp.track_lin_vel_y_exp, weight=1.0,
+        lat_vel = RewTerm(func=mdp.track_lin_vel_y_exp, weight=2.0,
                           params={"command_name": "base_velocity", "std": 0.4})
+
+        # Apply straightness only when the command itself requests a straight
+        # sprint, so it never fights intentional turns or lateral corrections.
+        straight_line = RewTerm(
+            func=mdp.straight_line_reward,
+            weight=STRAIGHT_LINE_WEIGHT,
+            params={
+                "command_name": "base_velocity",
+                "speed_threshold": 1.0,
+                "lateral_command_threshold": 0.12,
+                "yaw_command_threshold": 0.12,
+                "yaw_rate_std": 0.25,
+                "lat_vel_std": 0.25,
+            },
+        )
 
 
 @configclass
@@ -403,7 +448,7 @@ class G1Running29dofEventsCfg(HumanoidEventsCfg):
     add_base_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass, mode="startup",
         params={"asset_cfg": SceneEntityCfg("robot", body_names=["waist_yaw_link", "pelvis_link"]),
-                "mass_distribution_params": (0.75, 1.25), "operation": "scale"},
+                "mass_distribution_params": (0.85, 1.15), "operation": "scale"},
     )
 
     reset_base = None
@@ -435,7 +480,7 @@ class G1Running29dofGaitLibraryEnvCfg(HumanoidEnvCfg):
             # bands are all trained evenly instead of being diluted by a single
             # uniform draw over 0..5.1.
             self.commands.base_velocity.lin_vel_x_segments = (
-                (0.0, 1.0),     # standing / slow walk
+                (0.3, 1.0),     # slow walk; exact 0 is sampled separately
                 (1.0, 2.5),     # slow run
                 (2.5, 4.0),     # mid run
                 (4.0, 4.7),     # fast run
@@ -463,6 +508,7 @@ class G1Running29dofGaitLibraryEnvCfg(HumanoidEnvCfg):
         self.curriculum.terrain_levels = None
 
         self.rewards.dof_torques_l2.weight = -1.0e-5
+        self.rewards.action_rate_l2.weight = -0.020
 
         # Domain randomization
         self.events.base_external_force_torque = None
@@ -476,12 +522,21 @@ class G1Running29dofGaitLibraryEnvCfg(HumanoidEnvCfg):
         self.events.randomize_ground_contact_friction.mode = "reset"
         # Stronger lateral push to train straight-line recovery from lateral drifts
         # (helps the vision lane-following when the robot veers off the target line).
-        self.events.push_robot.params['velocity_range'] = {"x": (-0.75, 0.75), "y": (-1.0, 1.0)}
+        self.events.push_robot.interval_range_s = (6.0, 10.0)
+        self.events.push_robot.params['velocity_range'] = {
+            "x": (-0.6, 0.6),
+            "y": (-0.8, 0.8),
+            "yaw": (-0.4, 0.4),
+        }
         # Larger COM offset on the torso to simulate a slight ground tilt / uneven
         # load while still keeping the terrain flat (train straight running under
         # an offset center of gravity).
         self.events.base_com.params['asset_cfg'] = SceneEntityCfg("robot", body_names=["waist_yaw_link", "pelvis_link"])
-        self.events.base_com.params['com_range'] = {"x": (-0.08, 0.08), "y": (-0.10, 0.10), "z": (-0.02, 0.02)}
+        self.events.base_com.params['com_range'] = {
+            "x": (-0.04, 0.04),
+            "y": (-0.05, 0.05),
+            "z": (-0.015, 0.015),
+        }
 
         self.episode_length_s = 20.0
 

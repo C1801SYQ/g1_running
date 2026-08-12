@@ -611,6 +611,14 @@ def upper_body_velocity_reward(
     return vel_penalty + acc_penalty
 
 
+def _standing_command_mask(command, speed_threshold: float) -> torch.Tensor:
+    """Mask true standing environments, with a generic command fallback."""
+    explicit_mask = getattr(command, "is_standing_env", None)
+    if explicit_mask is not None:
+        return explicit_mask.float()
+    return (torch.amax(command.command.abs(), dim=1) < speed_threshold).float()
+
+
 def low_speed_upright_reward(
     env: ManagerBasedRLEnv,
     command_name: str,
@@ -636,8 +644,7 @@ def low_speed_upright_reward(
         A tensor of shape (num_envs,) with the low-speed upright reward.
     """
     cmd = env.command_manager.get_term(command_name)
-    vel_cmd_x = cmd.command[:, 0].abs()
-    standing_mask = (vel_cmd_x < speed_threshold).float()
+    standing_mask = _standing_command_mask(cmd, speed_threshold)
     asset: Articulation = env.scene["robot"]
     body_id = asset.body_names.index(body_names)
     quat = asset.data.body_link_quat_w[:, body_id]
@@ -679,8 +686,7 @@ def default_posture_reward(
         A tensor of shape (num_envs,) with the standing posture reward.
     """
     cmd = env.command_manager.get_term(command_name)
-    vel_cmd_x = cmd.command[:, 0].abs()
-    standing_mask = (vel_cmd_x < speed_threshold).float()
+    standing_mask = _standing_command_mask(cmd, speed_threshold)
     asset: Articulation = env.scene["robot"]
     if joint_names is None:
         joint_ids = slice(None)
@@ -691,8 +697,9 @@ def default_posture_reward(
         )
     cur = asset.data.joint_pos[:, joint_ids]
     default = asset.data.default_joint_pos[:, joint_ids]
-    err = (cur - default) ** 2
-    reward = torch.exp(-torch.sum(err, dim=1) / std**2)
+    # Mean keeps the exponential in a useful gradient range for all 29 joints.
+    err = torch.mean((cur - default) ** 2, dim=1)
+    reward = torch.exp(-err / std**2)
     return 1.0 + standing_mask * (reward - 1.0)
 
 
@@ -720,15 +727,103 @@ def low_speed_joint_stillness_reward(
         A tensor of shape (num_envs,) with the stillness reward contribution.
     """
     cmd = env.command_manager.get_term(command_name)
-    vel_cmd_x = cmd.command[:, 0].abs()
-    standing_mask = (vel_cmd_x < speed_threshold).float()
+    standing_mask = _standing_command_mask(cmd, speed_threshold)
     asset: Articulation = env.scene["robot"]
     joint_vel = asset.data.joint_vel
     joint_acc = asset.data.joint_acc
-    vel_penalty = torch.sum(joint_vel**2, dim=1) / joint_vel_std**2
-    acc_penalty = torch.sum(joint_acc**2, dim=1) / joint_acc_std**2
+    vel_penalty = torch.mean(joint_vel**2, dim=1) / joint_vel_std**2
+    acc_penalty = torch.mean(joint_acc**2, dim=1) / joint_acc_std**2
     reward = torch.exp(-(vel_penalty + acc_penalty))
     return 1.0 + standing_mask * (reward - 1.0)
+
+
+def low_speed_hip_roll_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    speed_threshold: float = 0.3,
+    roll_std: float = 0.12,
+) -> torch.Tensor:
+    """Reward nominal symmetric hip roll only in true standing environments."""
+    cmd = env.command_manager.get_term(command_name)
+    standing_mask = _standing_command_mask(cmd, speed_threshold)
+    asset: Articulation = env.scene["robot"]
+    hip_roll_ids = [
+        i for i, name in enumerate(asset.joint_names)
+        if name.endswith("_hip_roll_joint")
+    ]
+    hip_roll = asset.data.joint_pos[:, hip_roll_ids]
+    default_hip_roll = asset.data.default_joint_pos[:, hip_roll_ids]
+    roll_penalty = torch.mean(
+        (hip_roll - default_hip_roll) ** 2, dim=1
+    ) / roll_std**2
+    reward = torch.exp(-roll_penalty)
+    return 1.0 + standing_mask * (reward - 1.0)
+
+
+def slow_speed_hip_yaw_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    min_speed: float = 0.3,
+    max_speed: float = 1.5,
+    lateral_command_threshold: float = 0.12,
+    yaw_command_threshold: float = 0.12,
+    yaw_std: float = 0.14,
+) -> torch.Tensor:
+    """Keep both feet facing forward during the slow straight gait band.
+
+    The mask excludes standing, turning, lateral correction, and faster running
+    so this term cannot suppress the hip-yaw authority needed for recovery.
+    """
+    command = env.command_manager.get_term(command_name).command
+    mask = torch.logical_and(
+        command[:, 0].abs() >= min_speed,
+        torch.logical_and(
+            command[:, 0].abs() <= max_speed,
+            torch.logical_and(
+                command[:, 1].abs() < lateral_command_threshold,
+                command[:, 2].abs() < yaw_command_threshold,
+            ),
+        ),
+    ).float()
+    asset: Articulation = env.scene["robot"]
+    hip_yaw_ids = [
+        i for i, name in enumerate(asset.joint_names)
+        if name.endswith("_hip_yaw_joint")
+    ]
+    hip_yaw = asset.data.joint_pos[:, hip_yaw_ids]
+    default_hip_yaw = asset.data.default_joint_pos[:, hip_yaw_ids]
+    penalty = torch.mean(
+        (hip_yaw - default_hip_yaw) ** 2, dim=1
+    ) / yaw_std**2
+    reward = torch.exp(-penalty)
+    return 1.0 + mask * (reward - 1.0)
+
+
+def straight_line_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    speed_threshold: float = 2.0,
+    lateral_command_threshold: float = 0.12,
+    yaw_command_threshold: float = 0.12,
+    yaw_rate_std: float = 0.25,
+    lat_vel_std: float = 0.25,
+) -> torch.Tensor:
+    """Reward low lateral/yaw motion only for actual high-speed straight commands."""
+    cmd = env.command_manager.get_term(command_name)
+    command = cmd.command
+    straight_mask = torch.logical_and(
+        command[:, 0] > speed_threshold,
+        torch.logical_and(
+            command[:, 1].abs() < lateral_command_threshold,
+            command[:, 2].abs() < yaw_command_threshold,
+        ),
+    ).float()
+    asset: Articulation = env.scene["robot"]
+    yaw_rate = asset.data.root_ang_vel_b[:, 2]
+    lat_vel = asset.data.root_lin_vel_b[:, 1]
+    penalty = (yaw_rate / yaw_rate_std) ** 2 + (lat_vel / lat_vel_std) ** 2
+    reward = torch.exp(-penalty)
+    return 1.0 + straight_mask * (reward - 1.0)
 
 
 def torque_limits(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:

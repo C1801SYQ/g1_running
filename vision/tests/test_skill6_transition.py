@@ -50,7 +50,7 @@ POLICY_REPOSITORY = (
     else VM_REPOSITORY
 )
 POLICY_PATH = POLICY_REPOSITORY / "rl_sar/policy/g1/running/policy.pt"
-POLICY_SHA256 = "f0a1793ec60c64f0938115582179d79a285cea69ffb914f6506efe662550c72c"
+POLICY_SHA256 = "5de41b2e247d44db8c1378cc32367227482ab911a640366bc1fc563fda153b57"
 
 
 class Skill6TransitionTests(unittest.TestCase):
@@ -143,6 +143,17 @@ class Skill6TransitionTests(unittest.TestCase):
         self.assertIn("G1_VISION_MAX_WZ", run_source)
         self.assertIn("G1_VISION_SPRINT 1", command_source)
         self.assertIn("G1_VISION_STATUS_PORT", command_source)
+
+    def test_skill6_clears_stale_policy_targets(self) -> None:
+        sdk_path = (
+            REPOSITORY_CANDIDATE
+            / "rl_sar/src/rl_sar/library/core/rl_sdk/rl_sdk.cpp"
+        )
+        if not sdk_path.is_file():
+            self.skipTest("rl_sdk source is unavailable in patch-only mode")
+        sdk_source = sdk_path.read_text(encoding="utf-8")
+
+        self.assertIn("output_dof_pos_queue.try_pop(stale_output)", sdk_source)
 
 
 if __name__ == "__main__":

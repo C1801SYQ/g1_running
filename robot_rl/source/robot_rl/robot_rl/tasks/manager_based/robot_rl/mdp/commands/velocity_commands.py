@@ -33,6 +33,7 @@ class VelocityTrackingCommand(UniformVelocityCommand):
 
         self.is_closed_loop_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.is_closed_loop_yaw_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.is_open_loop_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         self.command_dt = env.cfg.sim.dt * env.cfg.decimation
         self.current_vel_b = torch.zeros(env.num_envs, 3, device=self.device)
@@ -41,7 +42,7 @@ class VelocityTrackingCommand(UniformVelocityCommand):
         rel_sum = (cfg.rel_open_loop + cfg.rel_closed_loop
                    + cfg.rel_closed_loop_yaw + cfg.rel_standing_envs)
 
-        if rel_sum != 1.0:
+        if abs(rel_sum - 1.0) > 1.0e-6:
             raise ValueError("Relative envs for the velocity tracking command don't sum to 1!")
 
     def __str__(self) -> str:
@@ -85,13 +86,20 @@ class VelocityTrackingCommand(UniformVelocityCommand):
         r = torch.empty(len(env_ids), device=self.device)
 
         # Determine which envs use what controller
-        self.is_closed_loop_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_closed_loop
+        # Assign every environment to exactly one mode. The former interval
+        # comparisons overlapped open-loop and closed-loop samples.
+        mode_sample = r.uniform_(0.0, 1.0)
+        open_end = self.cfg.rel_open_loop
+        yaw_end = open_end + self.cfg.rel_closed_loop_yaw
+        standing_end = yaw_end + self.cfg.rel_standing_envs
+        self.is_open_loop_env[env_ids] = mode_sample < open_end
         self.is_closed_loop_yaw_env[env_ids] = torch.logical_and(
-            r <= self.cfg.rel_closed_loop_yaw + self.cfg.rel_open_loop,
-            r >= self.cfg.rel_open_loop)
+            mode_sample >= open_end, mode_sample < yaw_end
+        )
         self.is_standing_env[env_ids] = torch.logical_and(
-            r <= self.cfg.rel_standing_envs + self.cfg.rel_closed_loop_yaw + self.cfg.rel_open_loop,
-            r >= self.cfg.rel_closed_loop_yaw + self.cfg.rel_open_loop)
+            mode_sample >= yaw_end, mode_sample < standing_end
+        )
+        self.is_closed_loop_env[env_ids] = mode_sample >= standing_end
 
         # -- linear velocity - x direction
         # Segment the x-velocity distribution so every speed band (standing /
@@ -137,11 +145,12 @@ class VelocityTrackingCommand(UniformVelocityCommand):
         cl_env_ids = self.is_closed_loop_env.nonzero(as_tuple=False).flatten()
         standing_env_ids = self.is_standing_env.nonzero(as_tuple=False).flatten()
 
-        self.vel_command_b = self.vel_target_b
+        # Controller corrections must not overwrite the sampled target.
+        desired_command_b = self.vel_target_b.clone()
 
         # yaw only envs
         heading_error = math_utils.wrap_to_pi(self.heading_target[yaw_env_ids] - self.robot.data.heading_w[yaw_env_ids])
-        self.vel_command_b[yaw_env_ids, 2] = torch.clip(
+        desired_command_b[yaw_env_ids, 2] = torch.clip(
             self.cfg.heading_control_stiffness * heading_error,     # TODO: Consider adding a D term
             min=self.cfg.ranges.ang_vel_z[0],
             max=self.cfg.ranges.ang_vel_z[1],
@@ -151,28 +160,36 @@ class VelocityTrackingCommand(UniformVelocityCommand):
         y_error = self.y_target[cl_env_ids] - self.robot.data.root_pos_w[cl_env_ids, 1]
         heading_error = math_utils.wrap_to_pi(self.heading_target[cl_env_ids] - self.robot.data.heading_w[cl_env_ids])
         y_vel_error = -self.robot.data.root_vel_w[cl_env_ids, 1]     #  TODO: Consider moving average filter here
-        self.vel_command_b[cl_env_ids, 1] = torch.clip(
+        desired_command_b[cl_env_ids, 1] = torch.clip(
             self.y_kp[cl_env_ids] * y_error + self.y_kd[cl_env_ids] * y_vel_error,
             min=self.cfg.ranges.lin_vel_y[0],
             max=self.cfg.ranges.lin_vel_y[1],
         )
-        self.vel_command_b[cl_env_ids, 2] = torch.clip(
+        desired_command_b[cl_env_ids, 2] = torch.clip(
             self.cfg.heading_control_stiffness * heading_error,     # TODO: Consider adding a D term
             min=self.cfg.ranges.ang_vel_z[0],
             max=self.cfg.ranges.ang_vel_z[1],
         )
 
         # standing
-        self.vel_command_b[standing_env_ids, :] = 0.0
+        desired_command_b[standing_env_ids, :] = 0.0
 
-        # TODO: This needs more testing to see if needed
-        # self.vel_command_b = torch.clamp(
-        #     self.vel_command_b,
-        #     min=self.current_vel_b - self.cfg.max_acc * self.command_dt,
-        #     max=self.current_vel_b + self.cfg.max_acc * self.command_dt,
-        # )
-
-        self.current_vel_b = self.vel_command_b
+        # Smooth stand/run changes while retaining faster yaw recovery.
+        max_acc = torch.as_tensor(
+            self.cfg.max_acc, dtype=desired_command_b.dtype, device=self.device
+        ).flatten()
+        if max_acc.numel() == 1:
+            max_acc = max_acc.repeat(3)
+        if max_acc.numel() != 3:
+            raise ValueError("max_acc must be a scalar or a 3-tuple (vx, vy, yaw)")
+        max_delta = max_acc.unsqueeze(0) * self.command_dt
+        limited_command_b = torch.clamp(
+            desired_command_b,
+            min=self.current_vel_b - max_delta,
+            max=self.current_vel_b + max_delta,
+        )
+        self.vel_command_b.copy_(limited_command_b)
+        self.current_vel_b.copy_(limited_command_b)
 
 # class TreadmillVelocityCommand(UniformVelocityCommand):
 #     """Base velocity command that also does PD control about a y position."""
