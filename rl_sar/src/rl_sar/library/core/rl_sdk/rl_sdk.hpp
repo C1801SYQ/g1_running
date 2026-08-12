@@ -24,6 +24,7 @@
 #include "inference_runtime.hpp"
 #include "logger.hpp"
 #include "motion_loader.hpp"
+#include "vision_udp_command.hpp"
 
 template <typename T>
 struct RobotCommand
@@ -231,6 +232,26 @@ public:
     // control
     Control control;
     void KeyboardInterface();
+
+    // vision UDP command receiver (Skill 6 / Skill 7 share this socket)
+    VisionUdpCommandReceiver vision_udp_command;
+
+    // Tracks which policy config is currently loaded into `model`. Distinct
+    // from `rl_init_done` (which means the inference loop is currently
+    // enabled): a loaded model can persist across FSM states so entering and
+    // leaving Skill 7 does not block the control loop with a model reload.
+    // `rl_init_done` must not be used as a proxy for "model is loaded".
+    std::string loaded_robot_config_path;
+
+    // True when `model` is non-null and was loaded from `robot_config_path`.
+    // Note: `model` may be a std::unique_ptr; a null `loaded_robot_config_path`
+    // means no policy has been loaded yet.
+    bool HasLoadedPolicy(const std::string &robot_config_path) const
+    {
+        return model != nullptr &&
+               !loaded_robot_config_path.empty() &&
+               loaded_robot_config_path == robot_config_path;
+    }
 
     // history buffer
     ObservationBuffer history_obs_buf;

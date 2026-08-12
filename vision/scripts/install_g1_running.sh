@@ -5,7 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_ROOT="${G1_RUNNING_ROOT:-${HOME}/unitree_ws/g1_running}"
 REPOSITORY="https://github.com/C1801SYQ/g1_running.git"
 COMMIT="3d029b92687cfd5a679360aa1d6dd41a9e3079f8"
-POLICY_SHA256="a6c0998c38113b2a471839b247b1424aed5d4da1c6609d60cec8f00f6831ff9c"
+POLICY_SHA256="f0a1793ec60c64f0938115582179d79a285cea69ffb914f6506efe662550c72c"
 INTEGRATION="${PROJECT_ROOT}/integrations/g1_running"
 
 if [[ ! -d "${TARGET_ROOT}/.git" ]]; then

@@ -50,7 +50,7 @@ POLICY_REPOSITORY = (
     else VM_REPOSITORY
 )
 POLICY_PATH = POLICY_REPOSITORY / "rl_sar/policy/g1/running/policy.pt"
-POLICY_SHA256 = "a6c0998c38113b2a471839b247b1424aed5d4da1c6609d60cec8f00f6831ff9c"
+POLICY_SHA256 = "f0a1793ec60c64f0938115582179d79a285cea69ffb914f6506efe662550c72c"
 
 
 class Skill6TransitionTests(unittest.TestCase):

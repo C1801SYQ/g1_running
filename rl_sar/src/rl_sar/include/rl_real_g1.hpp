@@ -254,7 +254,6 @@ private:
     uint8_t mode_machine;
     Gamepad gamepad;
     REMOTE_DATA_RX remote_data_rx;
-    VisionUdpCommandReceiver vision_udp_command;
     ChannelPublisherPtr<LowCmd_> lowcmd_publisher;
     ChannelSubscriberPtr<LowState_> lowstate_subscriber;
     ChannelSubscriberPtr<IMUState_> imutorso_subscriber;

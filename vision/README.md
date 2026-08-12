@@ -61,10 +61,53 @@ python vision/scripts/run_realsense_ros2.py --ros-args \
   -p guided_search_margin_ratio:=0.08
 ```
 
+实机入口默认处于硬性 Dry-run：不会创建 UDP 发送器，
+`/g1/race/cmd_vel` 始终发布零速度；算法计算出的未执行命令只发布到
+`/g1/race/desired_cmd_vel`。第一阶段相机与感知验收应保持默认值：
+
+```bash
+python vision/scripts/run_realsense_ros2.py --ros-args \
+  -p command_output_enabled:=false
+```
+
+G1 NX 已安装 ROS 2 和源码版 RealSense Wrapper 后，可在仓库根目录用一条
+命令同时启动相机与强制 Dry-run 视觉节点；按 `Ctrl+C` 会关闭两个进程：
+
+```bash
+bash vision/scripts/run_g1_realsense_dry_run.sh
+```
+
+该脚本不会提供启用运动输出的参数，并且发现 `rl_real_g1` 或 `g1_ctrl`
+进程时会拒绝启动。
+
+深度安全模块在中央可配置 ROI 内使用有效深度的稳健分位数，默认在 0.80 m
+内停车、0.80–1.50 m 线性减速；深度缺失、有效比例不足或超过 0.20 秒未更新
+都会失败归零。话题分工为：
+
+- `/g1/race/desired_cmd_vel`：视觉控制器的原始建议；
+- `/g1/race/safe_cmd_vel`：经过深度安全门后的建议；
+- `/g1/race/cmd_vel`：实际输出，Dry-run 中始终为零；
+- `/g1/race/safety_state`：障碍物距离、有效深度比例、帧龄和停止原因。
+
+已编译 audit bridge 后，可运行完整的无运动调用验收链：
+
+```bash
+bash vision/scripts/run_g1_realsense_audit.sh
+```
+
+audit bridge 只监听 `127.0.0.1:15003`，强制 `vy=0`，把 `vx` 和 `wz`
+分别限到 0.10 m/s 和 0.10 rad/s，并在 200 ms 收不到命令时归零。当前
+二进制没有速度、起立、停止或 FSM 修改调用，不能驱动机器人。
+
+只有在完成 RGB-D/IMU 标定、仿真闭环、架空测试和独立急停验证后，才允许由
+操作员显式设置 `command_output_enabled:=true`。仅把
+`cruise_speed_mps` 设为零不能代替 Dry-run 闸门，因为控制器仍有最低跟踪速度。
+
 ## 目录
 
 ```text
 vision/
+├── depth_safety.py            # 深度障碍物、数据新鲜度和失效归零
 ├── line_detector.py           # 双白线识别与跑道身份锁定
 ├── controller.py              # 视觉/IMU 融合、加速与终点减速
 ├── rendering.py               # MuJoCo RGB-D 渲染
@@ -74,6 +117,8 @@ vision/
 │   ├── install_g1_running.sh  # 应用 rl_sar 集成补丁并首次编译
 │   ├── build_skill6.sh        # 只重编译 rl_real_g1，不改原 policy
 │   ├── prepare_unitree_scene.py
+│   ├── run_g1_realsense_audit.sh   # 深度安全+audit bridge 联调
+│   ├── run_g1_realsense_dry_run.sh # 真机相机+感知强制 Dry-run
 │   ├── run_unitree_camera_sim.py
 │   ├── run_vm_full_demo.sh
 │   ├── start_vm_gui.sh
@@ -82,6 +127,7 @@ vision/
 ├── assets/                    # 独立视觉闭环场景与截图
 ├── tests/                     # 55 项单元测试
 └── integrations/
+    ├── g1_loco_bridge/        # 无运动调用的 SDK2 audit bridge
     ├── g1_running/            # rl_sar C++ 集成补丁
     └── unitree_rl_mjlab/      # 早期 ONNX 接入参考
 ```
@@ -183,6 +229,94 @@ bash vision/scripts/start_vm_gui.sh
 UNITREE_ROOT=~/unitree_ws \
 G1_RUNNING_ROOT="$PWD" \
 bash vision/scripts/run_vm_full_demo.sh
+```
+
+## Skill 7（Num7）：1.0 m 视觉行走
+
+Skill 7 复用状态 1 的 `robomimic/locomotion` 策略，通过 D435i 识别白线，以策略训练分布内的 `0.50 m/s` 沿线前进约 1 米，自动停止并返回状态 1。`WALK0P5M` 仅作为兼容旧版本的 UDP 模式名保留。它**不能**与 Unitree 高层 LocoClient 并行使用。
+
+```text
+Passive ──0──> GetUp ──1──> 状态 1 ──7──> Skill 7 ──完成/超时/故障──> 零速保持 ──> 状态 1
+```
+
+`7` 只在状态 1 有效。进入后 vx/vy/wz 清零，等待第一条正向、安全、新鲜的运动命令（最多 2 秒），随后以命令速度积分估算前进距离。
+
+> **任务计时与 FSM 握手**：Python 视觉可以**先于** `rl_real_g1` 启动，但 Num7 的时间和距离累计**只在收到 C++ FSM 的 `G1_VISION_WALK_0P5M 1` 后才开始**（状态端口 15002，C++ 每 0.5 秒周期心跳重发）。按 7 之前 Python 不累计时间、不累计距离、不输出非零命令、不发送会被下一次任务继承的 hard_stop。收到 `G1_VISION_WALK_0P5M 0` 后立即停止输出并清理任务状态。
+
+> **重要**：`estimated_distance` 是命令速度的积分估算，**不是**可靠的里程计实测值。真机验收必须以人工测量为准。**修复完成前的旧报告已失效。**
+
+### 停止条件（任一触发即自动回状态 1）
+
+1. 达到目标距离 / 保守停止点（默认 1.00 m，`G1_NUM7_TARGET_M`，限制 0.05～1.00，C++ 与 Python 两端一致）
+2. 总时长达到 7 秒（`G1_NUM7_MAX_DURATION_S`）
+3. 2 秒内没有第一条有效运动命令（`G1_NUM7_START_TIMEOUT_S`）
+4. UDP 超过 300 ms 无新命令
+5. Python 报告 hard_stop
+6. 深度缺失 / 过期 / 无效 / 检测到障碍
+7. 已锁线后丢线
+8. 持续收到 NaN、Inf 或非法 UDP 包
+
+> **非法 UDP 包的准确行为**：非法包（NaN/Inf/尾随垃圾/错误 hard_stop 值）会被 C++ 拒绝且**不刷新 watchdog**，也不会改变当前命令、hard_stop、freshness 或 generation 状态——它**不会**单包触发立即 hard-stop。停止由 watchdog 时序决定：
+> - 任务已开始：若之后只收到非法包（没有新的合法命令），最迟 300 ms 后触发 `UDP_STALE`；
+> - 任务尚未开始：若一直收不到第一条合法正向命令，最迟 2 秒（`G1_NUM7_START_TIMEOUT_S`）触发 start timeout。
+
+停止后 C++ 锁存 force_zero，保持至少 0.5 秒（`G1_NUM7_SETTLE_S`），然后自动返回 `RLFSMStateRLRoboMimicLocomotion`。手动退出：`P`/`LB+X` → Passive，`Num9`/`B` → GetDown，`Num1`/`RB+DPadUp` → 取消并回状态 1。
+
+> **模型复用（行为 A）**：Num7 只在状态 1 可达，进入时若 `robomimic/locomotion` 策略未加载则**拒绝 Num7 并转 Passive**，绝不在 Num7 Enter/控制周期内现场加载模型（避免阻塞控制循环）。Num1 → Num7 → Num1 复用已加载模型，不重复 InitRL。
+
+### 联合仿真（正式 Num7 仿真入口）
+
+```bash
+cd ~/g1_running && UNITREE_ROOT=/home/ubuntu G1_RUNNING_ROOT=/home/ubuntu/g1_running \
+  bash vision/scripts/run_num7_full_demo.sh
+```
+
+按 `0` → `1` → `7`。脚本记录 MuJoCo 实际起始与终止 qpos；Num7 结束后立即停止发送非零命令。
+
+真机放行前必须再运行严格的双任务 headless 门禁：
+
+```bash
+cd ~/g1_running
+bash vision/scripts/num7_headless_smoke.sh
+```
+
+门禁要求两次 Num7 都完成握手、锁线、释放约束、停止并保持零命令，且每次 MuJoCo 实测 qpos 前进必须落在目标 1 m 的开环容差 0.80～1.20 m。只有全部通过才生成
+`vision/output/num7_headless_smoke/HARDWARE_RELEASE_READY`。新的门禁运行会先删除旧标记，失败时不会留下可用标记。
+
+> **配置变更（2026-08-12）**：旧版 `0.10 m/s / 0.50 m` 配置落在现有 policy 的低速死区，已改为训练范围内的 `0.50 m/s / 1.00 m`。命令积分采用显式 `G1_NUM7_DISTANCE_SCALE=0.80` 仿真标定，但它仍不是里程计；是否允许真机以严格门禁的两次实际 qpos 结果为准。
+
+> **当前仿真放行状态（2026-08-12）**：严格连续两次门禁通过，FSM 停止时 MuJoCo 实际位移分别为 `0.894 m`、`1.121 m`；两次停止后一秒均为零命令，残余约束力为 0。已生成 `HARDWARE_RELEASE_READY`。这只解除软件/仿真门禁，不代替 Jetson 同步编译、D435i audit、吊起测试和地面人工测距。
+
+### 真机 audit-only（不运动）
+
+```bash
+bash vision/scripts/run_g1_realsense_audit.sh
+```
+
+### 真机吊起测试
+
+```bash
+# 1) 先在另一终端启动视觉（默认拒绝运动输出）
+bash vision/scripts/run_g1_num7_active.sh
+```
+
+该脚本默认 `G1_NUM7_COMMAND_OUTPUT_ENABLED=0`，拒绝启动。只有显式：
+
+```bash
+G1_ROBOT_INTERFACE=<已核验的真机DDS网卡> \
+G1_NUM7_COMMAND_OUTPUT_ENABLED=1 \
+  bash vision/scripts/run_g1_num7_active.sh
+```
+
+并且严格仿真门禁标记存在时，才会开启命令输出。脚本拒绝空网卡、`lo` 和不存在的网卡。**机器人必须吊起、现场必须有物理急停**，然后由你单独启动 `rl_real_g1` 并手动按 `0 → 1 → 7`。
+
+### 地面分阶段测试
+
+```bash
+G1_ROBOT_INTERFACE=<真机DDS网卡> G1_NUM7_COMMAND_OUTPUT_ENABLED=1 G1_NUM7_TARGET_M=0.10 bash vision/scripts/run_g1_num7_active.sh
+G1_ROBOT_INTERFACE=<真机DDS网卡> G1_NUM7_COMMAND_OUTPUT_ENABLED=1 G1_NUM7_TARGET_M=0.25 bash vision/scripts/run_g1_num7_active.sh
+G1_ROBOT_INTERFACE=<真机DDS网卡> G1_NUM7_COMMAND_OUTPUT_ENABLED=1 G1_NUM7_TARGET_M=0.50 bash vision/scripts/run_g1_num7_active.sh
+G1_ROBOT_INTERFACE=<真机DDS网卡> G1_NUM7_COMMAND_OUTPUT_ENABLED=1 G1_NUM7_TARGET_M=1.00 bash vision/scripts/run_g1_num7_active.sh
 ```
 
 ## 测试

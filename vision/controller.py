@@ -77,6 +77,7 @@ class ControllerCommand:
     wz: float
     state: str
     perception_valid: bool
+    hard_stop: bool = False
 
 
 class LaneFollowerController:
@@ -563,3 +564,140 @@ class LaneFollowerController:
             np.clip(target_vx - self._previous_vx, -max_delta, max_delta)
         )
         return self._previous_vx
+
+
+@dataclass(frozen=True)
+class Walk0p5mConfig:
+    """Python-side redundant safety limits for the Num7 1.0 m walk.
+
+    ``Walk0p5m`` remains the protocol/class name for backward compatibility.
+    """
+
+    max_vx_mps: float = 0.50
+    max_wz_rps: float = 0.25
+    target_distance_m: float = 1.00
+    # Open-loop calibration only; this is not measured odometry.
+    distance_scale: float = 0.80
+    max_duration_s: float = 7.0
+    stop_after_lost_s: float = 0.30
+
+
+class Walk0p5mGate:
+    """Python redundancy for the Num7 mission.
+
+    This is a secondary guard on top of the C++ FSM: it re-clamps vx/vy/wz,
+    integrates the *sent* safe vx, latches zero + hard_stop on distance,
+    timeout, visual loss or depth failure, and keeps sending zero after a
+    stop. The C++ FSM remains the owner of the final state lifecycle.
+
+    The gate has an explicit lifecycle. It does NOT start counting when
+    constructed: time and distance accumulate only after ``activate()`` is
+    called, which happens once the C++ FSM reports ``G1_VISION_WALK_0P5M 1``.
+    Before activation the gate outputs zero and never inherits a previous
+    mission's hard_stop / distance / timeout.
+    """
+
+    def __init__(self, config: Walk0p5mConfig | None = None) -> None:
+        self.config = config or Walk0p5mConfig()
+        self.reset()
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    def reset(self) -> None:
+        self._active = False
+        self._started = False
+        self._stopped = False
+        self._distance_m = 0.0
+        self._start_time: float | None = None
+        self._last_time: float | None = None
+        self._last_valid_time: float | None = None
+
+    def activate(self, now: float | None = None) -> None:
+        """Start a fresh Num7 mission. Time/distance reset to zero."""
+        self._active = True
+        self._started = False
+        self._stopped = False
+        self._distance_m = 0.0
+        now = time.monotonic() if now is None else float(now)
+        self._start_time = now
+        self._last_time = None
+        self._last_valid_time = None
+
+    def deactivate(self) -> None:
+        """Leave the Num7 mission: output zero, clear all task state so the
+        next activation is a brand-new mission."""
+        self._active = False
+        self.reset()
+
+    def update(
+        self,
+        desired: ControllerCommand,
+        now: float | None = None,
+    ) -> ControllerCommand:
+        now = time.monotonic() if now is None else float(now)
+
+        if not self._active:
+            # Not in a Num7 mission yet: hold zero, do not accumulate time or
+            # distance, and do not emit a hard_stop that could be inherited by
+            # a future session.
+            return ControllerCommand(0.0, 0.0, 0.0, "NUM7_INACTIVE", False, False)
+
+        dt = (
+            1.0 / 30.0
+            if self._last_time is None
+            else max(now - self._last_time, 1e-3)
+        )
+        self._last_time = now
+
+        if self._start_time is None:
+            self._start_time = now
+
+        if self._stopped:
+            # Keep sending zero + hard_stop until the FSM exits the state.
+            return ControllerCommand(0.0, 0.0, 0.0, "NUM7_STOPPED", False, True)
+
+        # Re-clamp to the Num7 hard limits.
+        vx = float(np.clip(desired.vx, 0.0, self.config.max_vx_mps))
+        vz = float(
+            np.clip(
+                desired.wz,
+                -self.config.max_wz_rps,
+                self.config.max_wz_rps,
+            )
+        )
+        clamped = ControllerCommand(
+            vx, 0.0, vz, desired.state, desired.perception_valid, False
+        )
+
+        # Lost-line rule for Num7: once locked, any loss stops immediately.
+        # Before the first lock we wait for the C++ start timeout (zero speed).
+        if not clamped.perception_valid:
+            if self._last_valid_time is None:
+                # Never seen a line yet: hold zero, wait for lock.
+                return ControllerCommand(
+                    0.0, 0.0, 0.0, "NUM7_WAIT_FOR_LINE", False, False
+                )
+            return ControllerCommand(
+                0.0, 0.0, 0.0, "NUM7_LINE_LOST", False, True
+            )
+
+        self._last_valid_time = now
+
+        # Integrate the sent safe vx (Python redundancy).
+        if self._started:
+            self._distance_m += vx * dt * self.config.distance_scale
+        elif vx > 0.0:
+            self._started = True
+            self._distance_m += vx * dt * self.config.distance_scale
+
+        if self._distance_m >= self.config.target_distance_m:
+            self._stopped = True
+            return ControllerCommand(0.0, 0.0, 0.0, "NUM7_DISTANCE", True, True)
+
+        if now - self._start_time >= self.config.max_duration_s:
+            self._stopped = True
+            return ControllerCommand(0.0, 0.0, 0.0, "NUM7_TIMEOUT", True, True)
+
+        return clamped
