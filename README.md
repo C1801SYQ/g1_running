@@ -8,7 +8,29 @@
 
 在 G1 21 自由度跑步策略基础上扩展为 **29 自由度**全身跑步，训练策略实现 0~5.1 m/s 变速跑步 + 转向，并通过 rl_sar 框架部署到 MuJoCo 仿真和实体机器人。
 
-**最终成果：** `steady_upper_v2` 模型实现高速跑步 + 视觉循迹，重点优化低速/站立姿态（骨盆直立、相机视角稳定）、上半身稳定（相机防抖）、yaw 转向能力与鲁棒性（COM 偏移、摩擦随机化）。
+**当前成果：** 部署策略来自
+`2026-08-12_13-11-17_gait_v2_finish_175198/model_175197.pt`，支持
+0~5.1 m/s 速度命令、转向和视觉百米冲刺。最近一次 Skill 6 MuJoCo
+实测完成 100 m 用时 **27.36 s**、平均速度 **3.65 m/s**，双线识别率
+0.965，最大横向偏移 0.758 m。
+
+> checkpoint 编号只在各自运行目录内有意义。当前 `model_175197` 与历史上
+> 站姿异常的同编号模型不是同一文件；部署策略 SHA256 为
+> `5de41b2e247d44db8c1378cc32367227482ab911a640366bc1fc563fda153b57`。
+
+## 当前状态（2026-08-12）
+
+| 项目 | 状态 |
+|------|------|
+| 当前部署策略 | `rl_sar/policy/g1/running/policy.pt`，gait_v2 `model_175197` |
+| 速度范围 | `vx=0~5.1 m/s`、`vy=±0.75 m/s`、`wz=±1.5 rad/s` |
+| 视觉实测 | 100 m / 27.36 s / 3.65 m/s，`max_abs_y=0.758 m` |
+| 正在续训 | gait_v3：175197 → 约 195197，2048 env，目标为平顺过渡、改善内八字和高速直线性 |
+| 训练服务 | `g1-running-gait-v3-195198.service`（systemd user service） |
+| 训练日志 | `/home/ubuntu/robot_rl/train_gait_v3_transition_straight.log` |
+
+当前部署模型已经通过视觉测试；gait_v3 新奖励仍在训练中，完成、导出和
+MuJoCo 回归测试之前不会自动替换部署策略。
 
 ---
 
@@ -37,14 +59,14 @@
 │   ├── transfer/sim/            # MuJoCo sim2sim 验证
 │   ├── transfer/obelisk/        # Obelisk 实体部署 (ROS2)
 │   ├── models/                  # 训练好的策略文件
-│   │   ├── speed_turn/          # ★ 最佳模型 (4.94 m/s)
+│   │   ├── speed_turn/          # 历史速度优先模型 (4.94 m/s)
 │   │   ├── speed_arm/           # 手臂摆动模型 (4.90 m/s)
-│   │   ├── steady_upper_v2/     # ★ 当前最佳 (165198 iter, 视觉循迹+静止站姿)
+│   │   ├── steady_upper_v2/     # 历史归档模型（165198 iter）
 │   │   └── standrun/            # 站立+跑步模型
 │   └── trajectories/running/    # 跑步步态轨迹库 (1.2~5.0 m/s)
 │
 └── rl_sar/                      # 仿真部署框架 (C++/Python)
-    ├── policy/g1/running/       # 策略加载配置
+    ├── policy/g1/running/       # ★ 当前部署策略及参数
     ├── src/rl_sar/              # 核心代码
     │   ├── fsm_robot/fsm_g1.hpp # G1 状态机 (含跑步策略状态)
     │   ├── library/core/rl_sdk/ # RL SDK (观测/输出/PID)
@@ -88,7 +110,7 @@
 
 | 改动 | 内容 |
 |------|------|
-| standing 轨迹 | 轨迹库加入官方 standing 轨迹（0 m/s），解决低速/站姿低头导致相机看不到白线（出现后仰bug） |
+| standing 轨迹（历史实验） | 曾加入官方 standing 轨迹解决低速低头，但其不对称关节姿态造成后仰，后续已移除 |
 | `pelvis_upright_reward` (4.0) | 骨盆 roll/pitch 保持直立，相机前视 |
 | `pelvis_height_reward` (3.0) | 骨盆保持 0.65m 高度，防止下蹲看地 |
 | `low_speed_upright_reward` (3.0) | 低速/静止时强制直立姿态 |
@@ -109,6 +131,23 @@
 | `rel_closed_loop_yaw` 0.30→0.45 | 更多环境用 yaw 闭环跟踪 |
 | `yaw_vel` 8.0→12.0 | 强化 yaw 转向跟踪（对应 yaw_vel 奖励从 2.3 提升到 ~5.0） |
 | `lat_vel` 3.0→1.0 | 减少横向位移依赖，逼策略用 yaw 旋转纠偏 |
+
+### 2c. gait_v2 / gait_v3 站跑过渡与直线性修复
+
+| 改动 | 内容 |
+|------|------|
+| 真站立环境掩码 | 站姿、静止和 hip-roll 奖励只作用于 `is_standing_env`，不再误伤 0.3~1.0 m/s 正常步态 |
+| 速度分段 | 慢速段改为 0.3~1.0 m/s；精确 0 m/s 由独立 standing 环境采样 |
+| 命令斜坡 | `max_acc=(3.0, 3.0, 4.0)`，训练策略适应站立→慢跑→高速的连续命令 |
+| 命令模式互斥 | 修复 open-loop、closed-loop-yaw、standing、closed-loop 采样区间重叠 |
+| `slow_speed_hip_yaw_reward` | 仅在 0.3~1.5 m/s 直线段约束 hip yaw，改善约 1 m/s 的内八字，同时保留转向和抗扰恢复能力 |
+| `straight_line_reward` | 直线命令且速度大于 1 m/s 时抑制横向速度和 yaw rate |
+| 动作平滑 | `action_rate_l2=-0.020`，降低站跑切换的关节目标突变 |
+| 抗扰随机化 | 每 6~10 s 注入 x/y/yaw 推扰动，并随机化摩擦、质量、COM、增益和关节物理参数 |
+
+部署端不会强制把步态相位重置为 0，也不会在 Skill 6 进入时把全身插值到
+默认站姿；实测表明这两种未经训练匹配的处理会导致骨盆下沉和起步险倒。
+策略切换仍会清空上一模型遗留的动作队列，避免消费陈旧关节目标。
 
 ### 3. Sim2Sim MuJoCo 修复 (robot_rl/transfer/sim)
 
@@ -141,17 +180,23 @@
 | 4 | `standrun` | 9,999 | **0.0-5.1** | **首次包含零速站立训练** | 4.75 m/s |
 | 5 | `rough_turn` | 5,000 | 0.0-5.1 | 粗糙地形+转向（续训 standrun） | 2.6 m/s (地形太保守) |
 | 6 | **`speed_turn`** | 10,000 | 0.0-5.1 | **速度权重 10x + 转向（续训 standrun）** | **4.94 m/s** ★ |
-| 7 | `speed_turn_v2` | 训练中 | 0.0-5.1 | 手臂 Q 权重 20x 恢复摆臂（续训 speed_turn） | - |
+| 7 | `speed_turn_v2` | 历史阶段 | 0.0-5.1 | 手臂 Q 权重 20x 恢复摆臂（续训 speed_turn） | 已合并到后续模型 |
 | 8 | **`steady_upper`** | 29,997 | 0.0-5.1 | 上肢稳定版（续训 speed_turn，arm Q 20x） | ~4.5 m/s |
 | 9 | **`steady_upper_v2`** | 89,996 | 0.0-5.1 | **视觉循迹优化**（续训 steady_upper）：骨盆直立/高度、上半身稳定、速度分段采样、COM/质量/摩擦随机化（出现后仰问题） | 4.94 m/s |
 | 10 | `steady_upper_v2_posture` | 109,995 | 0.0-5.1 | 修复 0 m/s 后仰：移除不对称 standing 轨迹，新增 default_posture 奖励 | 4.92 m/s |
 | 11 | `steady_upper_v2_torso` | 139,994 | 0.0-5.1 | **上肢稳定**（续训）：torso roll-rate + ang-vel 奖励，抑制左右晃动 | 4.92 m/s |
 | 12 | `steady_upper_v2_turn` | 155,200 | 0.0-5.1 | **转向强化**（续训）：rel_heading_envs 40%、rel_closed_loop_yaw 45%、lat_vel↓、yaw_vel↑，增强 yaw 转向 | 4.95 m/s |
-| 13 | `steady_upper_v2_still` | 165,198 | 0.0-5.1 | **0 m/s 关节静止**（续训）：新增 low_speed_joint_stillness 奖励，站立时关节完全静止不漂移 | ★ 当前部署 |
+| 13 | `steady_upper_v2_still` | 165,198 | 0.0-5.1 | **0 m/s 关节静止**（续训）：新增 low_speed_joint_stillness 奖励 | 最后一个历史稳定版 |
+| 14 | `stand_improve` | 175,197 | 0.0-5.1 | 站姿奖励错误覆盖到 0~0.9 m/s，导致张腿/怪异站姿 | 已弃用，禁止部署 |
+| 15 | `gait_v2_finish` | 175,197 | 0.0-5.1 | 修复 standing 掩码、速度段和命令斜坡后重训；当前部署 SHA256 `5de41b2e...3b57` | ★ 当前部署；视觉 100 m 27.36 s |
+| 16 | `gait_v3_transition_straight` | 目标约 195,197 | 0.0-5.1 | 从 gait_v2 续训：增加低速 hip-yaw、站立静止、动作平滑和 1 m/s 以上直线奖励 | 训练中，未部署 |
 
-> `steady_upper_v2` 针对视觉循迹做了专项优化：新增 standing 轨迹解决低速/站姿低头（相机看不到白线）、骨盆姿态/高度奖励保持相机前视、上半身稳定惩罚抑制抖动、COM 偏移与摩擦随机化增强平地直线鲁棒性。
+> `steady_upper_v2` 针对视觉循迹做了专项优化：骨盆姿态/高度奖励保持相机前视、上半身稳定惩罚抑制抖动、COM 偏移与摩擦随机化增强平地直线鲁棒性。standing 轨迹只用于早期实验，因姿态不对称已移除。
 >
 > 后续迭代持续修复问题：`posture` 修复 0 m/s 后仰（移除不对称 standing 轨迹 + default_posture 奖励）、`torso` 抑制跑步时骨盆左右晃动（torso roll-rate 奖励）、`turn` 强化 yaw 转向（减少横向位移依赖，逼策略用旋转纠偏）。
+>
+> `stand_improve` 与 `gait_v2_finish` 都出现过 `model_175197` 文件名，引用时
+> 必须同时写运行目录或 SHA256，不能只看迭代编号。
 
 ---
 
@@ -176,8 +221,22 @@ pip install -e source/robot_rl/
 ```
 
 > 注意：`num_envs` 建议用 2048（4096 在部分多 ICD 驱动环境会触发
-> omni `carb::tasking Mutex` 递归锁崩溃）。轨迹库包含 `standing` 轨迹
-> （0 m/s）用于低速/站姿直立训练。
+> omni `carb::tasking Mutex` 递归锁崩溃）。当前轨迹库不包含 standing
+> 文件；0 m/s 由独立 standing 命令环境、默认站姿和静止奖励训练。
+
+当前 gait_v3 续训由用户级 systemd 托管，关闭终端不会终止训练：
+
+```bash
+# 查看服务状态
+systemctl --user status g1-running-gait-v3-195198.service
+
+# 查看实时日志
+tail -f /home/ubuntu/robot_rl/train_gait_v3_transition_straight.log
+
+# 查看最近一次迭代
+tr '\r' '\n' < /home/ubuntu/robot_rl/train_gait_v3_transition_straight.log \
+    | grep 'Learning iteration' | tail -1
+```
 
 ### 导出策略
 
@@ -195,6 +254,10 @@ source ~/anaconda3/etc/profile.d/conda.sh && conda activate env_isaaclab
 export PYTHONPATH=$PWD/transfer:$PYTHONPATH
 python transfer/sim/g1_runner.py --env_type=running_clf_29dof \
     --scene=29dof_basic_scene --load_run=<RUN_DIR> --log
+
+# 0 m/s → 1 m/s → 5.1 m/s 的无头回归诊断
+python transfer/sim/diagnose_running_transitions.py \
+    --sim-assets-root /home/ubuntu/robot_rl/transfer/sim
 ```
 
 ### MuJoCo 仿真测试 (rl_sar)
@@ -249,11 +312,23 @@ P / LB_X      → 被动模式（急停）
 
 14. **IsaacSim 测速失真**: transfer/sim 测速因 `v_x_max=3.0`（play 配置工件）限幅、场景/PD 增益不对而失真。正确测速需用 `29dof_basic_scene` + `set_pd_gains_from_policy` + 修正 v_x_max，详见 sim2sim 章节。
 
+15. **低速奖励污染走路段**: 旧版用 `vx < 0.9` 判断站立，导致 0~0.9 m/s 环境同时被要求走路和关节静止。改为独立 `is_standing_env` 掩码，慢速采样从 0.3 m/s 起。
+
+16. **速度命令模式重叠**: 旧区间判断会让 open-loop、yaw 闭环和 standing 标志重叠。改为一次随机数划分四个互斥区间，并对目标命令做分轴 slew-rate 限制。
+
+17. **MuJoCo reset 后 Skill 6 不再运行**: viewer reset 只重置 `MjData`，不会通知 Python 任务状态。视觉进程现通过仿真时间回退或 X 位置大跳变重置整场 mission latch、检测器、控制器和计时状态。
+
+18. **策略切换首帧抽搐**: 推理并发队列可能残留上一模型输出。`InitRL()` 在加载新策略前清空 position/velocity/torque 输出队列，避免 Skill 6 消费陈旧动作。
+
 ---
 
 ## 轨迹库
 
-`trajectories/running/` 包含 0~5.1 m/s 的跑步步态（5 阶 Bezier 曲线），含官方 `standing` 轨迹（0 m/s，用于低速/站姿直立）。1.2~3.7 m/s 为官方轨迹，4.0~5.0 m/s 为从 3.6 m/s 外推生成（仅缩放 T，保持关节轨迹形状）。
+`trajectories/running/` 包含 1.2~5.0 m/s 的跑步步态（5 阶 Bezier
+曲线）。1.2~3.6 m/s 为官方轨迹，4.0/4.5/5.0 m/s 为从 3.6 m/s
+外推生成（仅缩放 T，保持关节轨迹形状）。精确 0 m/s 不使用 standing
+轨迹，而由独立 standing 命令环境配合默认站姿、关节静止和 hip-roll
+奖励学习。
 
 ---
 
@@ -261,8 +336,10 @@ P / LB_X      → 被动模式（急停）
 
 | 文件 | 说明 |
 |------|------|
-| `models/steady_upper_v2/policy.pt` | ★ 当前最佳 29dof 跑步策略（165198 iter, 视觉循迹+静止站姿） |
-| `models/steady_upper_v2/policy_parameters.yaml` | 策略参数（观测/动作/KP/KD/默认关节角） |
+| `rl_sar/policy/g1/running/policy.pt` | ★ 当前部署策略：gait_v2 `model_175197`，SHA256 `5de41b2e...3b57` |
+| `rl_sar/policy/g1/running/policy_parameters.yaml` | 当前部署参数（0~5.1 m/s、观测/动作/KP/KD/默认关节角） |
+| `models/steady_upper_v2/policy.pt` | 历史归档策略（165198 iter），不是当前部署文件 |
+| `models/steady_upper_v2/policy_parameters.yaml` | 历史归档策略参数 |
 | `models/speed_turn/policy.pt` | 速度优先策略 (JIT TorchScript) |
 | `models/speed_turn/policy_parameters.yaml` | 策略参数（观测/动作/KP/KD/默认关节角） |
 | `models/standrun/policy.pt` | 站立+跑步策略（速度优先权重较低版） |
@@ -302,6 +379,13 @@ Skill 6 复用原有 `running` policy，不替换 Skill 5。控制器必须按
 视觉百米冲刺；按 `6` 不会从 Passive 或 GetUp 自动起立。
 MuJoCo 的启动安全支撑会等待 C++ 确认进入 Skill 6 和双线锁定，不再因
 固定倒计时结束而让仍在操作状态机的机器人倒地。
+
+MuJoCo viewer reset 后，视觉任务会检测仿真时间回退/位置跳变并完整重置
+Skill 6 mission；无需重启 Python 视觉进程即可再次执行 `0 → 1 → 6`。
+
+当前 gait_v2 策略最近一次视觉回归结果：100 m 用时 27.36 s，平均
+3.65 m/s，双线识别率 0.965，最大横向偏移 0.758 m。偏移主要来自策略
+本体的低频横摆和终点前短暂丢线，gait_v3 正针对低速过渡和高速直线性续训。
 
 安装、DDS/Conda 配置、启动方式和仿真结果见
 [`vision/README.md`](vision/README.md)。
