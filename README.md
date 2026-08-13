@@ -18,6 +18,17 @@
 > 站姿异常的同编号模型不是同一文件；部署策略 SHA256 为
 > `5de41b2e247d44db8c1378cc32367227482ab911a640366bc1fc563fda153b57`。
 
+## 项目导航
+
+| 入口 | 用途 |
+|------|------|
+| [`robot_rl/README.md`](robot_rl/README.md) | Isaac Lab 训练、策略导出和 sim2sim |
+| [`rl_sar/README.md`](rl_sar/README.md) | C++/MuJoCo/实体机器人部署框架 |
+| [`vision/README.md`](vision/README.md) | Skill 6/7 视觉循迹、仿真与真机流程 |
+| [`docs/REPOSITORY_LAYOUT.md`](docs/REPOSITORY_LAYOUT.md) | 仓库目录职责、生成物边界和新增文件规范 |
+| [`vision/scripts/README.md`](vision/scripts/README.md) | 视觉脚本索引与安全级别 |
+| [`robot_rl/scripts/README.md`](robot_rl/scripts/README.md) | 训练、导出及工具脚本索引 |
+
 ## 当前状态（2026-08-12）
 
 | 项目 | 状态 |
@@ -65,13 +76,21 @@ MuJoCo 回归测试之前不会自动替换部署策略。
 │   │   └── standrun/            # 站立+跑步模型
 │   └── trajectories/running/    # 跑步步态轨迹库 (1.2~5.0 m/s)
 │
-└── rl_sar/                      # 仿真部署框架 (C++/Python)
+├── rl_sar/                      # 仿真部署框架 (C++/Python)
     ├── policy/g1/running/       # ★ 当前部署策略及参数
     ├── src/rl_sar/              # 核心代码
     │   ├── fsm_robot/fsm_g1.hpp # G1 状态机 (含跑步策略状态)
     │   ├── library/core/rl_sdk/ # RL SDK (观测/输出/PID)
     │   └── src/rl_sim_mujoco.cpp # MuJoCo 仿真器
-    └── cmake_build/bin/         # 编译产物
+│   └── cmake_build/bin/         # 本地编译产物（不提交）
+│
+├── vision/                      # Skill 6/7 视觉感知与任务编排
+│   ├── scripts/                 # 仿真、真机、审计、安装入口
+│   ├── tests/                   # 视觉/安全/任务生命周期测试
+│   ├── integrations/            # rl_sar 与审计桥集成
+│   └── docs/                    # 真机证据与专题报告
+│
+└── docs/                        # 仓库级结构和协作规范
 ```
 
 ---

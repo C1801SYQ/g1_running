@@ -21,3 +21,11 @@ context-memory/
 
 # Local AI tooling / skills - never publish
 .opencode/
+
+# Local build, backup, and runtime artifacts
+rl_sar/backups/
+vision/debug_output/
+vision/logs/
+
+# Environment audit output is machine-specific; keep the reusable script.
+robot_rl/scripts/env_check/*.txt
