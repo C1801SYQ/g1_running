@@ -62,7 +62,7 @@ class RealSenseLaneFollower(Node):
         self.declare_parameter("mission", "sprint100m")
         self.declare_parameter("num7_target_m", 1.00)
         self.declare_parameter("num7_max_duration_s", 7.0)
-        self.declare_parameter("num7_distance_scale", 0.80)
+        self.declare_parameter("num7_distance_scale", 0.60)
         self.declare_parameter("command_output_enabled", False)
         self.declare_parameter("status_host", "127.0.0.1")
         self.declare_parameter("status_port", 15002)

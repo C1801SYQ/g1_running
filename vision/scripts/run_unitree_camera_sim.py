@@ -374,7 +374,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num7-distance-scale",
         type=float,
-        default=0.80,
+        default=0.60,
         help="Open-loop Num7 distance calibration (not odometry).",
     )
     return parser.parse_args()

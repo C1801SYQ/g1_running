@@ -37,7 +37,7 @@ def main() -> int:
             "G1_NUM7_MAX_DURATION_S": "7.0",
             "G1_NUM7_STOP_MARGIN_M": "0.0",
             "G1_NUM7_DISTANCE_SCALE": os.environ.get(
-                "G1_NUM7_DISTANCE_SCALE", "0.80"
+                "G1_NUM7_DISTANCE_SCALE", "0.60"
             ),
             "G1_NUM7_START_TIMEOUT_S": "2.0",
             "G1_NUM7_SETTLE_S": "0.5",

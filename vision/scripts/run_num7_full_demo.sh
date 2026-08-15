@@ -96,7 +96,7 @@ python scripts/run_unitree_camera_sim.py \
     --vision-enable-delay 0.0 \
     --num7-target-m "${G1_NUM7_TARGET_M:-1.00}" \
     --num7-max-duration-s "${G1_NUM7_MAX_DURATION_S:-7.0}" \
-    --num7-distance-scale "${G1_NUM7_DISTANCE_SCALE:-0.80}" \
+    --num7-distance-scale "${G1_NUM7_DISTANCE_SCALE:-0.60}" \
     --startup-support-seconds 16.0 \
     --startup-support-fade-seconds 0.60 \
     --startup-support-until-mission \
@@ -125,7 +125,7 @@ G1_VISION_MAX_VX="${G1_VISION_MAX_VX:-0.50}" \
 G1_VISION_MAX_WZ="${G1_VISION_MAX_WZ:-0.25}" \
 G1_NUM7_TARGET_M="${G1_NUM7_TARGET_M:-1.00}" \
 G1_NUM7_STOP_MARGIN_M="${G1_NUM7_STOP_MARGIN_M:-0.0}" \
-G1_NUM7_DISTANCE_SCALE="${G1_NUM7_DISTANCE_SCALE:-0.80}" \
+G1_NUM7_DISTANCE_SCALE="${G1_NUM7_DISTANCE_SCALE:-0.60}" \
 G1_NUM7_MAX_DURATION_S="${G1_NUM7_MAX_DURATION_S:-7.0}" \
 G1_NUM7_START_TIMEOUT_S="${G1_NUM7_START_TIMEOUT_S:-2.0}" \
 G1_NUM7_SETTLE_S="${G1_NUM7_SETTLE_S:-0.5}" \

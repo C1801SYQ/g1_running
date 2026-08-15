@@ -850,12 +850,13 @@ private:
             target_m_ = ReadParam("G1_NUM7_TARGET_M", 1.00f, 0.05f, 1.00f);
             stop_margin_m_ = ReadParam(
                 "G1_NUM7_STOP_MARGIN_M", 0.0f, 0.0f, 0.20f);
-            // Open-loop distance calibration, not odometry.  MuJoCo with the
-            // deployed policy advances about 0.8 m per 1.0 m of integrated
-            // velocity command at 0.50 m/s. Keep it explicit and identical
-            // in C++ and Python so the intended 1 m stop can be audited.
+            // Open-loop distance calibration, not odometry. Two consecutive
+            // MuJoCo missions with the deployed policy measured 0.63 m and
+            // 0.59 m per 1.0 m of integrated velocity command at 0.50 m/s.
+            // Keep the median calibration explicit and identical in C++ and
+            // Python so the intended 1 m stop can be audited.
             distance_scale_ = ReadParam(
-                "G1_NUM7_DISTANCE_SCALE", 0.80f, 0.10f, 2.0f);
+                "G1_NUM7_DISTANCE_SCALE", 0.60f, 0.10f, 2.0f);
             max_duration_s_ = ReadParam(
                 "G1_NUM7_MAX_DURATION_S", 7.0f, 1.0f, 60.0f);
             start_timeout_s_ = ReadParam(
