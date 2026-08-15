@@ -111,6 +111,11 @@ class WhiteLaneDetector:
 
         self._locked_pair_geometry = None
         self._lane_anchor_geometry = None
+        # A new Num7 mission is also a new exposure session.  Keeping the
+        # previous mission's smoothed threshold can hide otherwise valid
+        # paint for the first few frames after lighting or auto-exposure has
+        # changed.
+        self._adaptive_value_threshold = None
         self._last_valid_lateral_error = 0.0
         self._boundary_breach_frames = 0
         self._lane_identity_lost = False
@@ -445,18 +450,38 @@ class WhiteLaneDetector:
                 left, right = sorted(
                     (first, second), key=lambda line: line.x_at(bottom_y)
                 )
-                bottom_width = right.x_at(bottom_y) - left.x_at(bottom_y)
-                top_width = right.x_at(lookahead_y) - left.x_at(lookahead_y)
-                if not (min_width <= bottom_width <= max_width):
+                observation_rows = self._joint_observation_rows(
+                    left,
+                    right,
+                    lookahead_y,
+                    bottom_y,
+                )
+                if observation_rows is None:
                     continue
-                if top_width <= 0.04 * width:
+                far_y, near_y = observation_rows
+
+                # On the real D435i view, a genuine boundary often exits the
+                # left or right edge before ``bottom_y``.  Measuring the pair
+                # at that fixed row extrapolated the two fits outside the
+                # image and rejected the correct lane as too wide.  Validate
+                # width and centre at the nearest row where both paint
+                # segments were actually observed.
+                near_width = right.x_at(near_y) - left.x_at(near_y)
+                far_width = right.x_at(far_y) - left.x_at(far_y)
+                if not (min_width <= near_width <= max_width):
                     continue
-                if top_width > bottom_width * self.config.max_top_to_bottom_width_ratio:
+                if far_width <= 0.04 * width:
+                    continue
+                if far_width > (
+                    near_width * self.config.max_top_to_bottom_width_ratio
+                ):
                     continue
 
-                width_match = np.exp(-abs(bottom_width - expected) / max(expected, 1.0))
+                width_match = np.exp(
+                    -abs(near_width - expected) / max(expected, 1.0)
+                )
                 pair_center = 0.5 * (
-                    left.x_at(bottom_y) + right.x_at(bottom_y)
+                    left.x_at(near_y) + right.x_at(near_y)
                 )
                 if (
                     self._lane_anchor_geometry is None
@@ -519,6 +544,26 @@ class WhiteLaneDetector:
                     best_score = score
                     best = (left, right)
         return best
+
+    @staticmethod
+    def _joint_observation_rows(
+        left: LineModel,
+        right: LineModel,
+        lookahead_y: int,
+        bottom_y: int,
+    ) -> Optional[tuple[float, float]]:
+        """Return far/near rows supported by both observed paint segments."""
+
+        far_y = max(float(lookahead_y), left.y_min, right.y_min)
+        near_y = min(float(bottom_y), left.y_max, right.y_max)
+        expected_span = max(float(bottom_y - lookahead_y), 1.0)
+        # Twenty percent still supplies multiple fitted cross-sections at
+        # 640x480, while tolerating the common case where one thick boundary
+        # reaches the image edge shortly below the lookahead row.
+        minimum_overlap = max(8.0, 0.20 * expected_span)
+        if near_y - far_y < minimum_overlap:
+            return None
+        return far_y, near_y
 
     def _guided_pair_from_mask(
         self,

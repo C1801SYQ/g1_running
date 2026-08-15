@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import unittest
 
 import cv2
@@ -51,6 +52,49 @@ class WhiteLaneDetectorTest(unittest.TestCase):
         self.assertTrue(result.valid)
         self.assertIsNotNone(result.left_line)
         self.assertIsNotNone(result.right_line)
+
+    def test_boundaries_clipped_before_fixed_bottom_row_remain_detectable(self):
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        image[:] = (70, 70, 70)
+        # Both boundaries are genuinely visible over a long shared span, but
+        # leave the image before the detector's fixed near-field geometry row.
+        # Extrapolating to that row makes their apparent width exceed 640 px.
+        cv2.line(image, (0, 400), (120, 182), (245, 245, 245), 14)
+        cv2.line(image, (639, 305), (560, 182), (245, 245, 245), 14)
+
+        result = WhiteLaneDetector().detect(image)
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.source, "two-lines")
+        self.assertIsNotNone(result.left_line)
+        self.assertIsNotNone(result.right_line)
+
+    def test_latest_field_frames_lock_as_a_stable_two_line_sequence(self):
+        frame_dir = (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "skill7_vision_audit"
+            / "images"
+            / "field_20260815_live"
+        )
+        detector = WhiteLaneDetector()
+        frame_paths = sorted(frame_dir.glob("f*_raw_color.png"))
+        self.assertEqual(len(frame_paths), 3)
+
+        for frame_path in frame_paths:
+            bgr = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(bgr, str(frame_path))
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            result = detector.detect(rgb)
+            self.assertTrue(
+                result.valid,
+                f"{frame_path.name}: {result.source}",
+            )
+            self.assertIn(
+                result.source,
+                ("two-lines", "two-lines-guided"),
+            )
+            self.assertGreater(result.confidence, 0.25)
 
     def test_lane_center_to_right_is_positive(self):
         result = WhiteLaneDetector().detect(synthetic_lane(shift_px=70))
@@ -176,6 +220,15 @@ class WhiteLaneDetectorTest(unittest.TestCase):
         # lane eligible for the initial identity lock.
         self.assertFalse(detector.detect(synthetic_lane(shift_px=160)).valid)
         self.assertTrue(detector.detect(synthetic_lane()).valid)
+
+    def test_reset_restarts_adaptive_exposure_for_the_new_mission(self):
+        detector = WhiteLaneDetector()
+        detector.detect(synthetic_lane())
+        self.assertIsNotNone(detector._adaptive_value_threshold)
+
+        detector.reset()
+
+        self.assertIsNone(detector._adaptive_value_threshold)
 
     def test_large_pair_offset_enters_boundary_recovery(self):
         detector = WhiteLaneDetector()
