@@ -13,6 +13,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from g1_race_vision.camera_geometry import CameraIntrinsics
 from g1_race_vision.command_output import CommandOutputGate
 from g1_race_vision.controller import (
     ControllerCommand,
@@ -40,7 +41,7 @@ try:
     from geometry_msgs.msg import Twist
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
-    from sensor_msgs.msg import Image
+    from sensor_msgs.msg import CameraInfo, Image
 except ImportError as error:
     raise SystemExit(
         "ROS2 Python packages are missing. Source /opt/ros/humble/setup.bash "
@@ -58,11 +59,15 @@ class RealSenseLaneFollower(Node):
             "depth_topic",
             "/camera/camera/aligned_depth_to_color/image_raw",
         )
+        self.declare_parameter(
+            "camera_info_topic",
+            "/camera/camera/color/camera_info",
+        )
         self.declare_parameter("cruise_speed_mps", 0.20)
         self.declare_parameter("mission", "sprint100m")
         self.declare_parameter("num7_target_m", 1.00)
         self.declare_parameter("num7_max_duration_s", 7.0)
-        self.declare_parameter("num7_distance_scale", 0.80)
+        self.declare_parameter("num7_distance_scale", 0.60)
         self.declare_parameter("command_output_enabled", False)
         self.declare_parameter("status_host", "127.0.0.1")
         self.declare_parameter("status_port", 15002)
@@ -85,9 +90,22 @@ class RealSenseLaneFollower(Node):
         self.declare_parameter("white_saturation_max", 100)
         self.declare_parameter("local_contrast_min", 14)
         self.declare_parameter("guided_search_margin_ratio", 0.075)
+        self.declare_parameter("local_value_ratio", 0.65)
+        self.declare_parameter("min_mean_thickness_ratio", 0.007)
+        self.declare_parameter("initial_lock_confirm_frames", 10)
+        self.declare_parameter("initial_min_center_margin_ratio", 0.03)
+        self.declare_parameter("initial_min_abs_perspective_slope", 0.05)
+        self.declare_parameter("expected_lane_width_m", 2.10)
+        self.declare_parameter("min_lane_width_m", 1.75)
+        self.declare_parameter("max_lane_width_m", 2.45)
+        self.declare_parameter("debug_candidates", True)
 
         color_topic = self.get_parameter("color_topic").value
         depth_topic = self.get_parameter("depth_topic").value
+        camera_info_topic = self.get_parameter("camera_info_topic").value
+        self.debug_candidates = bool(
+            self.get_parameter("debug_candidates").value
+        )
         speed = float(self.get_parameter("cruise_speed_mps").value)
         self.mission = str(self.get_parameter("mission").value)
         self.num7_target_m = float(
@@ -141,10 +159,37 @@ class RealSenseLaneFollower(Node):
             guided_search_margin_ratio=float(
                 self.get_parameter("guided_search_margin_ratio").value
             ),
+            local_value_ratio=float(
+                self.get_parameter("local_value_ratio").value
+            ),
+            min_mean_thickness_ratio=float(
+                self.get_parameter("min_mean_thickness_ratio").value
+            ),
+            initial_lock_confirm_frames=int(
+                self.get_parameter("initial_lock_confirm_frames").value
+            ),
+            initial_min_center_margin_ratio=float(
+                self.get_parameter("initial_min_center_margin_ratio").value
+            ),
+            initial_min_abs_perspective_slope=float(
+                self.get_parameter(
+                    "initial_min_abs_perspective_slope"
+                ).value
+            ),
+            expected_lane_width_m=float(
+                self.get_parameter("expected_lane_width_m").value
+            ),
+            min_lane_width_m=float(
+                self.get_parameter("min_lane_width_m").value
+            ),
+            max_lane_width_m=float(
+                self.get_parameter("max_lane_width_m").value
+            ),
         )
         self.bridge = CvBridge()
         self.detector = WhiteLaneDetector(detector_config)
         if self.mission == "walk0p5m":
+            self.detector.configure_num7_lifecycle(True)
             # Use a command inside the locomotion policy's trained walking
             # range. The gate remains a secondary independent clamp.
             self.controller = LaneFollowerController(
@@ -213,6 +258,9 @@ class RealSenseLaneFollower(Node):
         )
         self.latest_depth_m: np.ndarray | None = None
         self.latest_depth_time = 0.0
+        self.camera_intrinsics: CameraIntrinsics | None = None
+        self._last_detector_mode = "PREVIEW"
+        self._num7_references_calibrated = False
         self.latest_safety = self.depth_safety.evaluate(None, float("inf"))
         # The UDP listener runs on a background thread, while the detector,
         # controller and distance gate are owned by the ROS image callback.
@@ -225,6 +273,12 @@ class RealSenseLaneFollower(Node):
         )
         self.create_subscription(
             Image, color_topic, self.on_color, qos_profile_sensor_data
+        )
+        self.create_subscription(
+            CameraInfo,
+            camera_info_topic,
+            self.on_camera_info,
+            qos_profile_sensor_data,
         )
         self.cmd_publisher = self.create_publisher(
             Twist, "/g1/race/cmd_vel", 10
@@ -331,6 +385,47 @@ class RealSenseLaneFollower(Node):
                     "Num7 FSM disable received; gate inactive"
                 )
 
+    def on_camera_info(self, message: CameraInfo) -> None:
+        if message.width <= 0 or message.height <= 0:
+            self.get_logger().warning(
+                "ignoring invalid CameraInfo", once=True
+            )
+            return
+        has_p = len(message.p) >= 8
+        has_k = len(message.k) >= 9
+        if not has_p and not has_k:
+            self.get_logger().warning(
+                "CameraInfo contains neither p nor k", once=True
+            )
+            return
+        fx = float(message.p[0] if has_p else message.k[0])
+        fy = float(message.p[5] if has_p else message.k[4])
+        cx = float(message.p[2] if has_p else message.k[2])
+        cy = float(message.p[6] if has_p else message.k[5])
+        if fx <= 0.0 or fy <= 0.0:
+            self.get_logger().warning(
+                "CameraInfo has non-positive focal length", once=True
+            )
+            return
+        self.camera_intrinsics = CameraIntrinsics(
+            fx=fx,
+            fy=fy,
+            cx=cx,
+            cy=cy,
+            width=int(message.width),
+            height=int(message.height),
+            model=message.distortion_model or "plumb_bob",
+            distortion=tuple(float(value) for value in message.d),
+        )
+        self.get_logger().info(
+            "CameraInfo received: "
+            f"fx={self.camera_intrinsics.fx:.1f} "
+            f"fy={self.camera_intrinsics.fy:.1f} "
+            f"cx={self.camera_intrinsics.cx:.1f} "
+            f"cy={self.camera_intrinsics.cy:.1f}",
+            once=True,
+        )
+
     def on_depth(self, message: Image) -> None:
         depth = self.bridge.imgmsg_to_cv2(
             message, desired_encoding="passthrough"
@@ -356,9 +451,28 @@ class RealSenseLaneFollower(Node):
         )
         if depth is not None and depth.shape != rgb.shape[:2]:
             depth = None
+        intrinsics = (
+            self.camera_intrinsics
+            if depth is not None
+            else None
+        )
 
-        result = self.detector.detect(rgb, depth)
+        result = self.detector.detect(rgb, depth, intrinsics)
         if self.mission == "walk0p5m":
+            if (
+                result.mode == "LOCKED"
+                and self._last_detector_mode != "LOCKED"
+            ):
+                self.detector.set_lateral_reference(result.lateral_error)
+                self.controller.set_visual_heading_reference(
+                    result.heading_error_rad
+                )
+                self._num7_references_calibrated = True
+                self.get_logger().warning(
+                    "Num7 initial lock completed; lane/heading references "
+                    "calibrated"
+                )
+            self._last_detector_mode = result.mode
             desired_command = self.controller.update(result)
             self.latest_safety = self.depth_safety.evaluate(
                 self.latest_depth_m, depth_age
@@ -387,7 +501,9 @@ class RealSenseLaneFollower(Node):
         self.cmd_publisher.publish(self._to_twist(actual_command))
         self.publish_safety_status(self.latest_safety)
 
-        debug = self.detector.annotate(rgb, result)
+        debug = self.detector.annotate(
+            rgb, result, debug_candidates=self.debug_candidates
+        )
         cv2.putText(
             debug,
             (

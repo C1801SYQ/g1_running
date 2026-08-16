@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import unittest
 
 import cv2
@@ -51,6 +52,49 @@ class WhiteLaneDetectorTest(unittest.TestCase):
         self.assertTrue(result.valid)
         self.assertIsNotNone(result.left_line)
         self.assertIsNotNone(result.right_line)
+
+    def test_boundaries_clipped_before_fixed_bottom_row_remain_detectable(self):
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        image[:] = (70, 70, 70)
+        # Both boundaries are genuinely visible over a long shared span, but
+        # leave the image before the detector's fixed near-field geometry row.
+        # Extrapolating to that row makes their apparent width exceed 640 px.
+        cv2.line(image, (0, 400), (120, 182), (245, 245, 245), 14)
+        cv2.line(image, (639, 305), (560, 182), (245, 245, 245), 14)
+
+        result = WhiteLaneDetector().detect(image)
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.source, "two-lines")
+        self.assertIsNotNone(result.left_line)
+        self.assertIsNotNone(result.right_line)
+
+    def test_latest_field_frames_lock_as_a_stable_two_line_sequence(self):
+        frame_dir = (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "skill7_vision_audit"
+            / "images"
+            / "field_20260815_live"
+        )
+        detector = WhiteLaneDetector()
+        frame_paths = sorted(frame_dir.glob("f*_raw_color.png"))
+        self.assertEqual(len(frame_paths), 3)
+
+        for frame_path in frame_paths:
+            bgr = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(bgr, str(frame_path))
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            result = detector.detect(rgb)
+            self.assertTrue(
+                result.valid,
+                f"{frame_path.name}: {result.source}",
+            )
+            self.assertIn(
+                result.source,
+                ("two-lines", "two-lines-guided"),
+            )
+            self.assertGreater(result.confidence, 0.25)
 
     def test_lane_center_to_right_is_positive(self):
         result = WhiteLaneDetector().detect(synthetic_lane(shift_px=70))
@@ -177,6 +221,15 @@ class WhiteLaneDetectorTest(unittest.TestCase):
         self.assertFalse(detector.detect(synthetic_lane(shift_px=160)).valid)
         self.assertTrue(detector.detect(synthetic_lane()).valid)
 
+    def test_reset_restarts_adaptive_exposure_for_the_new_mission(self):
+        detector = WhiteLaneDetector()
+        detector.detect(synthetic_lane())
+        self.assertIsNotNone(detector._adaptive_value_threshold)
+
+        detector.reset()
+
+        self.assertIsNone(detector._adaptive_value_threshold)
+
     def test_large_pair_offset_enters_boundary_recovery(self):
         detector = WhiteLaneDetector()
 
@@ -296,6 +349,111 @@ class WhiteLaneDetectorTest(unittest.TestCase):
         )
 
         self.assertAlmostEqual(abs(averaged), np.pi, places=6)
+
+    def _num7_detector(self, **config_overrides):
+        overrides = dict(initial_lock_confirm_frames=3)
+        overrides.update(config_overrides)
+        config = LaneDetectorConfig(**overrides)
+        detector = WhiteLaneDetector(config)
+        detector.configure_num7_lifecycle(True)
+        detector.set_num7_mission_active(True)
+        return detector
+
+    def test_num7_preview_never_pollutes_formal_lane_identity(self):
+        detector = WhiteLaneDetector(
+            LaneDetectorConfig(
+                initial_lock_confirm_frames=3,
+                boundary_breach_confirm_frames=1,
+            )
+        )
+        detector.configure_num7_lifecycle(True)
+
+        for _ in range(100):
+            detector.detect(synthetic_lane(shift_px=190))
+
+        self.assertIsNone(detector._lane_anchor_geometry)
+        self.assertIsNone(detector._locked_pair_geometry)
+        self.assertEqual(detector._boundary_breach_frames, 0)
+        self.assertFalse(detector._lane_identity_lost)
+        self.assertEqual(detector._mission_state, "PREVIEW")
+
+    def test_num7_initial_lock_requires_confirmation_frames(self):
+        detector = self._num7_detector()
+
+        first = detector.detect(synthetic_lane())
+        self.assertFalse(first.valid)
+        self.assertEqual(first.source, "INITIAL_LOCK")
+        self.assertEqual(first.mode, "INITIAL_LOCK")
+        self.assertIsNone(detector._lane_anchor_geometry)
+
+        second = detector.detect(synthetic_lane())
+        self.assertFalse(second.valid)
+        self.assertEqual(second.lock_confirm, 2)
+
+        locked = detector.detect(synthetic_lane())
+        self.assertTrue(locked.valid)
+        self.assertEqual(locked.mode, "LOCKED")
+        self.assertIsNotNone(detector._lane_anchor_geometry)
+        self.assertIsNotNone(detector._locked_pair_geometry)
+
+    def test_num7_initial_lock_pair_jump_resets_confirmation(self):
+        detector = self._num7_detector()
+        detector.detect(synthetic_lane())
+        self.assertEqual(detector._lock_confirm_count, 1)
+
+        detector.detect(synthetic_lane(shift_px=60))
+        self.assertEqual(detector._lock_confirm_count, 1)
+
+    def test_num7_initial_lock_rejects_thin_centre_seam(self):
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        image[:] = (70, 70, 70)
+        cv2.line(image, (95, 479), (255, 175), (245, 245, 245), 14)
+        cv2.line(image, (545, 479), (385, 175), (245, 245, 245), 14)
+        cv2.line(image, (350, 175), (390, 479), (245, 245, 245), 2)
+
+        detector = self._num7_detector()
+        first = detector.detect(image)
+        self.assertIn(
+            "initial thickness",
+            " ".join(first.candidate_reject_reasons),
+        )
+
+        result = None
+        for _ in range(4):
+            result = detector.detect(image)
+
+        self.assertTrue(result.valid)
+        self.assertIsNotNone(result.left_line)
+        self.assertIsNotNone(result.right_line)
+        self.assertLess(result.left_line.slope, -0.20)
+        self.assertGreater(result.right_line.slope, 0.20)
+
+    def test_num7_initial_lock_rejects_boundary_warning_pair(self):
+        detector = self._num7_detector(
+            initial_min_center_margin_ratio=0.0,
+            initial_lock_confirm_frames=2,
+            max_pair_center_offset_ratio=0.50,
+        )
+
+        for _ in range(5):
+            result = detector.detect(synthetic_lane(shift_px=132))
+
+        self.assertNotEqual(detector._mission_state, "LOCKED")
+        self.assertIsNone(detector._lane_anchor_geometry)
+        self.assertIn(
+            "boundary-warning", " ".join(result.candidate_reject_reasons)
+        )
+
+    def test_num7_reset_returns_to_preview_and_clears_initial_lock(self):
+        detector = self._num7_detector()
+        for _ in range(3):
+            detector.detect(synthetic_lane())
+        self.assertEqual(detector._mission_state, "LOCKED")
+
+        detector.set_num7_mission_active(False)
+        self.assertEqual(detector._mission_state, "PREVIEW")
+        self.assertIsNone(detector._lane_anchor_geometry)
+        self.assertFalse(detector._lane_identity_lost)
 
     def test_attitude_alignment_recovers_combined_camera_rotation(self):
         image = synthetic_lane()

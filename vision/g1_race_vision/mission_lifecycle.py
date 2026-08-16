@@ -36,10 +36,20 @@ def apply_num7_mode_transition(
             return None
         detector.reset()
         controller.reset()
+        activate_detector = getattr(
+            detector, "set_num7_mission_active", None
+        )
+        if callable(activate_detector):
+            activate_detector(True)
         gate.activate(now=now)
         return "enabled"
 
     if gate.active:
+        deactivate_detector = getattr(
+            detector, "set_num7_mission_active", None
+        )
+        if callable(deactivate_detector):
+            deactivate_detector(False)
         gate.deactivate()
         return "disabled"
     return None

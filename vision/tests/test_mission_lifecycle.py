@@ -75,6 +75,8 @@ class Num7ModeLifecycleTest(unittest.TestCase):
         controller = LaneFollowerController()
         gate = Walk0p5mGate()
 
+        detector.configure_num7_lifecycle(True)
+        detector.set_num7_mission_active(True)
         detector._lane_identity_lost = True
         controller._previous_vx = 0.50
         gate.activate(now=1.0)
@@ -91,6 +93,36 @@ class Num7ModeLifecycleTest(unittest.TestCase):
         self.assertEqual(controller._previous_vx, 0.0)
         self.assertEqual(gate._distance_m, 0.0)
         self.assertTrue(gate.active)
+        self.assertTrue(detector._num7_mission_active)
+        self.assertEqual(detector._mission_state, "INITIAL_LOCK")
+
+    def test_rising_edge_activates_num7_initial_lock(self) -> None:
+        detector = WhiteLaneDetector()
+        detector.configure_num7_lifecycle(True)
+        controller = LaneFollowerController()
+        gate = Walk0p5mGate()
+
+        apply_num7_mode_transition(
+            "WALK0P5M", detector, controller, gate, now=10.0
+        )
+
+        self.assertTrue(detector._num7_mission_active)
+        self.assertEqual(detector._mission_state, "INITIAL_LOCK")
+
+    def test_disable_returns_detector_to_preview(self) -> None:
+        detector = WhiteLaneDetector()
+        detector.configure_num7_lifecycle(True)
+        detector.set_num7_mission_active(True)
+        controller = LaneFollowerController()
+        gate = Walk0p5mGate()
+        gate.activate(now=1.0)
+
+        apply_num7_mode_transition(
+            "NONE", detector, controller, gate, now=2.0
+        )
+
+        self.assertFalse(detector._num7_mission_active)
+        self.assertEqual(detector._mission_state, "PREVIEW")
 
 
 class MujocoResetDetectionTest(unittest.TestCase):
