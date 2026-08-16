@@ -624,7 +624,7 @@ class Walk0p5mConfig:
     max_wz_rps: float = 0.25
     target_distance_m: float = 1.00
     # Open-loop calibration only; this is not measured odometry.
-    distance_scale: float = 0.80
+    distance_scale: float = 0.60
     max_duration_s: float = 7.0
     stop_after_lost_s: float = 0.30
 

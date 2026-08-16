@@ -19,6 +19,27 @@
 - MuJoCo 启动安全支撑不再按固定 16 秒强制消失；C++ 状态机会通过本机 UDP 确认真正进入 Skill 6，再平滑卸掉垂直支撑并等待真实相机姿态稳定，双线锁定后释放水平起跑约束，人工操作慢也不会因超时倒地。
 - 越过 100 m 后继续巡线并平滑减速，视觉 UDP 超过 300 ms 无新数据时强制输出零速度。
 
+## Num7 初始锁道与真机 CameraInfo
+
+Num7（`walk0p5m`）使用独立的感知生命周期：
+
+```text
+PREVIEW → INITIAL_LOCK → LOCKED → TRACKING_LOST / IDENTITY_LOST
+```
+
+- `PREVIEW` 只显示候选线和推荐 pair，不修改任何正式 lane identity。
+- 真实 `WALK0P5M` 上升沿会清空 detector/controller/gate，并进入
+  `INITIAL_LOCK`。连续 `initial_lock_confirm_frames`（默认 10 帧）观察到
+  几何一致的同一组双线后，才用确认窗口的中位几何建立不可移动 lane anchor。
+- `INITIAL_LOCK` 额外要求：左右边界分别位于画面中心两侧、左线斜率为负、
+  右线斜率为正、候选不是 boundary-warning、候选厚度不是地砖缝级别。
+- 当 aligned depth 与 `/camera/camera/color/camera_info` 都可用时，还会把
+  多条近场采样行反投影到 3D，验证两条边界物理间距是否落在
+  `[min_lane_width_m, max_lane_width_m]`（默认 1.75..2.45 m）。深度或内参
+  不可用时自动退回原 2D 几何门限。
+- 调试画面 HUD 增加 `mode`、`lock`、`phys_width` 和候选线详情；候选线详情由
+  ROS 参数 `debug_candidates` 控制。
+
 ## 控制结构
 
 ```text
@@ -285,7 +306,7 @@ bash vision/scripts/num7_headless_smoke.sh
 门禁要求两次 Num7 都完成握手、锁线、释放约束、停止并保持零命令，且每次 MuJoCo 实测 qpos 前进必须落在目标 1 m 的开环容差 0.80～1.20 m。只有全部通过才生成
 `vision/output/num7_headless_smoke/HARDWARE_RELEASE_READY`。新的门禁运行会先删除旧标记，失败时不会留下可用标记。
 
-> **配置变更（2026-08-12）**：旧版 `0.10 m/s / 0.50 m` 配置落在现有 policy 的低速死区，已改为训练范围内的 `0.50 m/s / 1.00 m`。命令积分采用显式 `G1_NUM7_DISTANCE_SCALE=0.80` 仿真标定，但它仍不是里程计；是否允许真机以严格门禁的两次实际 qpos 结果为准。
+> **配置变更（2026-08-15）**：旧版 `0.10 m/s / 0.50 m` 配置落在现有 policy 的低速死区，已改为训练范围内的 `0.50 m/s / 1.00 m`。根据当前 policy 两次 MuJoCo 实测，命令积分采用显式 `G1_NUM7_DISTANCE_SCALE=0.60` 标定；它仍不是里程计，是否允许真机以严格门禁的两次实际 qpos 结果为准。
 
 > **当前仿真放行状态（2026-08-12）**：严格连续两次门禁通过，FSM 停止时 MuJoCo 实际位移分别为 `0.894 m`、`1.121 m`；两次停止后一秒均为零命令，残余约束力为 0。已生成 `HARDWARE_RELEASE_READY`。这只解除软件/仿真门禁，不代替 Jetson 同步编译、D435i audit、吊起测试和地面人工测距。
 

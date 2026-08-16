@@ -122,7 +122,7 @@ class Walk0p5mConfigTest(unittest.TestCase):
         self.assertEqual(config.max_vx_mps, 0.50)
         self.assertEqual(config.max_wz_rps, 0.25)
         self.assertEqual(config.target_distance_m, 1.00)
-        self.assertEqual(config.distance_scale, 0.80)
+        self.assertEqual(config.distance_scale, 0.60)
         self.assertEqual(config.max_duration_s, 7.0)
 
 
