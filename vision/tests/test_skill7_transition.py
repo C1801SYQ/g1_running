@@ -153,24 +153,23 @@ class Skill7TransitionTests(unittest.TestCase):
             self.assertIn("HasLoadedPolicy", sdk_src)
             self.assertIn("model != nullptr", sdk_src)
 
-    def test_num7_support_release_is_mission_aware(self) -> None:
-        """The sim support/restraint release must be mission-aware: Num7 must
-        set lane_lock_acquired on lock so the X/Y/yaw starting restraint is
-        released, and must clear it on exit so a second Num7 re-locks."""
+    def test_num7_support_release_does_not_wait_for_lane_lock(self) -> None:
+        """Startup support protects policy stabilization only; line lock is
+        retained for correction calibration and must not authorize motion."""
         if USING_PATCH_ARTIFACT:
             self.skipTest("patch artifact has no full FSM source")
         sim = SIM_SCRIPT_PATH.read_text(encoding="utf-8")
         # physics loop fade trigger must include Num7.
         self.assertIn("or num7_enabled.is_set()", sim)
-        # Release text is now mission-generic, not Skill 6 only.
-        self.assertIn("released after ", sim)
-        self.assertIn("mission lane lock", sim)
-        # Num7 lock sets the shared lane-lock event.
+        self.assertIn("correction-only", sim)
+        self.assertNotIn("elif not lane_lock_acquired.is_set()", sim)
+        # Num7 still records visual lock for correction diagnostics.
         self.assertIn("lane_lock_acquired.set()", sim)
-        # Num7 exit clears it for a re-lock on the next entry.
+        # Num7 exit clears the correction lock for the next entry.
         self.assertIn("lane_lock_acquired.clear()", sim)
-        # Num7 waits for the restraint to be released before moving.
+        # Num7 waits only for policy support to fade, not for white lines.
         self.assertIn("NUM7_RESTRAINT_ENGAGED", sim)
+        self.assertIn("straight walk started independently of line", sim)
         # New CLI parameter name used by the Num7 launcher.
         self.assertIn("--startup-support-until-mission", sim)
         self.assertIn("startup_support_until_mission", sim)
@@ -202,6 +201,15 @@ class Skill7TransitionTests(unittest.TestCase):
         )[1].split("def on_depth", 1)[0]
         self.assertIn("apply_num7_mode_transition(", lifecycle)
         self.assertIn("self._mode_events.put(current_mode)", real)
+
+    def test_real_camera_heading_uses_d435i_color_intrinsics(self) -> None:
+        real = (VISION_ROOT / "scripts/run_realsense_ros2.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("/camera/camera/color/camera_info", real)
+        self.assertIn("def on_camera_info", real)
+        self.assertIn("CameraIntrinsics(", real)
+        self.assertIn("self.detector.detect(rgb, depth, intrinsics)", real)
 
     def test_num7_startup_restraint_fades_before_start_timeout(self) -> None:
         source = NUM7_SCRIPT_PATH.read_text(encoding="utf-8")

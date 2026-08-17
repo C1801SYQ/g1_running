@@ -21,6 +21,9 @@ action_scale:
   .*_wrist_yaw_joint: 0.04385773139233672
 skill_type: half_periodic
 total_time: 0.43055999279022217
+phase_period: 0.43055999279022217
+phase_hold_threshold: 0.1
+phase_boundaries: 4
 v_x_max: 5.1
 v_x_min: 0.0
 v_y_max: 0.75

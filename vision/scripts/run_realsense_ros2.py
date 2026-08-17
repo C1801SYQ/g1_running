@@ -112,7 +112,7 @@ class RealSenseLaneFollower(Node):
             self.get_parameter("num7_target_m").value
         )
         self.num7_target_m = float(
-            min(max(self.num7_target_m, 0.05), 1.00)
+            min(max(self.num7_target_m, 0.05), 200.00)
         )
         self.num7_max_duration_s = float(
             self.get_parameter("num7_max_duration_s").value
@@ -146,6 +146,7 @@ class RealSenseLaneFollower(Node):
         )
 
         detector_config = LaneDetectorConfig(
+            correction_only_mode=(self.mission == "walk0p5m"),
             white_value_min=int(self.get_parameter("white_value_min").value),
             adaptive_value_floor=int(
                 self.get_parameter("adaptive_value_floor").value
@@ -194,7 +195,7 @@ class RealSenseLaneFollower(Node):
             # range. The gate remains a secondary independent clamp.
             self.controller = LaneFollowerController(
                 LaneFollowerConfig(
-                    cruise_speed_mps=0.50,
+                    cruise_speed_mps=1.00,
                     minimum_tracking_speed_mps=0.50,
                     max_yaw_rate_rps=0.25,
                     max_forward_accel_mps2=0.20,
@@ -202,7 +203,11 @@ class RealSenseLaneFollower(Node):
                     max_yaw_accel_rps2=0.50,
                     lateral_kp=1.20,
                     heading_kp=0.20,
+                    use_visual_heading_correction=True,
                     imu_heading_kp=1.20,
+                    correction_enter_lateral_error=0.12,
+                    correction_exit_lateral_error=0.06,
+                    predictive_enter_lateral_error=0.08,
                     error_filter_alpha=0.32,
                 )
             )

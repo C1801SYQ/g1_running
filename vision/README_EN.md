@@ -14,7 +14,7 @@ A closed-loop 100 m sprint stack for the **29-DoF Unitree G1**, integrating MuJo
 - Detects two real white lane boundaries using exposure-adaptive segmentation, local contrast, motion-blur-aware morphology, and robust Huber line fitting.
 - Creates an immutable start-frame lane anchor; short-term tracking may follow camera shake but cannot walk the lock into an adjacent lane.
 - Refits fragmented boundaries from real pixels near the locked pair and separates common camera shake from lane-shape changes; it never invents a missing second line.
-- Lets the trained policy and G1 IMU hold the straight heading; vision stays neutral inside a center corridor and only applies bounded, hysteretic correction outside it.
+- Lets the trained policy and G1 IMU own forward motion and the straight heading. The robot can start and continue without a valid line pair; vision only adds bounded, hysteretic correction when trustworthy boundaries are available.
 - Adds an isolated **Skill 6** to `rl_sar`: state-1-only entry, lane lock, sprint, timed 100 m crossing, visually guided deceleration, and automatic return to Passive.
 - Uses the deployed gait-v2 `model_175197` policy for Skills 5/6 and verifies its SHA-256 before building.
 - Uses averaged full-attitude homography stabilization, lane-lock zero-bias calibration, IMU straight-heading hold, and bounded vision recovery through the 100 m line.
@@ -32,7 +32,7 @@ A closed-loop 100 m sprint stack for the **29-DoF Unitree G1**, integrating MuJo
 | Full stop position | 100.67–101.88 m |
 | Falls / adjacent-lane switches / identity loss | 0 / 0 / 0 |
 
-The table is a historical pre-optimization baseline and does not claim results for this revision. The current defaults use gait-v2 `model_175197`, a `0.35 rad/s` yaw-rate limit, `3.00 m/s²` command acceleration, event-driven state-1 readiness, and a 0.60 s Skill-6 camera settling window. Timing begins only after lane lock releases acceleration; hardware deployment still requires staged low-speed validation.
+The table is a historical pre-optimization baseline and does not claim results for this revision. The current defaults use gait-v2 `model_175197`, a `0.35 rad/s` yaw-rate limit, `3.00 m/s²` command acceleration, event-driven state-1 readiness, and a 0.60 s Skill-6 camera settling window. Timing begins after policy stabilization and startup-support release; lane lock enables correction but does not release forward motion. Hardware deployment still requires staged low-speed validation.
 
 ## Architecture
 
@@ -89,9 +89,9 @@ conda activate g1race
 python -m unittest discover -s tests -v
 ```
 
-The 125 tests cover the deployed policy checksum, strict two-line validation, low light and exposure changes, motion blur, full camera-attitude stabilization, immutable adjacent-lane locking, straight-corridor neutrality, predictive drift confirmation, correction hysteresis, mission reset, perception dropout, finish-line braking, the Skill 7 detector lifecycle and safety chain, and the event-driven Skill 6 startup handshake.
+The tests cover the deployed policy checksum, strict two-line validation, low light and exposure changes, motion blur, full camera-attitude stabilization, immutable adjacent-lane locking, straight-corridor neutrality, predictive drift confirmation, correction hysteresis, mission reset, IMU-straight fallback without line perception, finish-line braking, the Skill 7 detector lifecycle and independent safety chain, and the event-driven Skill 6 startup handshake.
 
-For Skill 7, every real `NONE -> WALK0P5M` edge resets the detector, controller, and distance gate on the camera-callback thread. This clears a prior mission's latched lane-identity loss without allowing the 500 ms heartbeat to reset the immutable lane anchor during the current mission. The simulation support fade is 0.60 s, safely below the 2.0 s first-forward-command timeout.
+For Skill 7, every real `NONE -> WALK0P5M` edge resets the detector, controller, and distance gate on the camera-callback thread. This clears a prior mission's latched lane-identity loss without allowing the 500 ms heartbeat to reset the immutable lane anchor during the current mission. Forward motion starts under IMU heading hold after policy support fades and does not wait for lane lock; a later valid lock enables visual correction. The simulation support fade is 0.60 s, safely below the 2.0 s first-forward-command timeout.
 
 ## Sim-to-Real Status
 

@@ -5,6 +5,9 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_ROOT="${G1_RACE_ROOT:-${SCRIPT_ROOT}}"
 REPOSITORY_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
 UNITREE_ROOT="${UNITREE_ROOT:-${HOME}/unitree_ws}"
+if [[ ! -d "${UNITREE_ROOT}/unitree_mujoco" && -d "${HOME}/unitree_mujoco" ]]; then
+    UNITREE_ROOT="${HOME}"
+fi
 MUJOCO_ROOT="${UNITREE_ROOT}/unitree_mujoco"
 DEFAULT_RUNNING_REPOSITORY="${UNITREE_ROOT}/g1_running"
 if [[ -f "${REPOSITORY_ROOT}/rl_sar/src/rl_sar/include/vision_udp_command.hpp" ]]; then

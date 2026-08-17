@@ -5,10 +5,13 @@ import unittest
 
 from g1_race_vision.controller import (
     ControllerCommand,
+    LaneFollowerConfig,
+    LaneFollowerController,
     Walk0p5mConfig,
     Walk0p5mGate,
 )
 from g1_race_vision.depth_safety import DepthSafetyGate
+from g1_race_vision.line_detector import DetectionResult
 
 
 class Walk0p5mGateTest(unittest.TestCase):
@@ -32,21 +35,46 @@ class Walk0p5mGateTest(unittest.TestCase):
         out = gate.update(cmd, now=1.0)
         self.assertEqual(out.vy, 0.0)
 
-    def test_zero_before_first_valid_perception(self) -> None:
+    def test_forward_motion_does_not_wait_for_first_valid_perception(self) -> None:
         gate = self.make_gate()
         gate.activate(now=1.0)
         cmd = ControllerCommand(0.10, 0.0, 0.0, "T", False, False)
         out = gate.update(cmd, now=1.0)
-        self.assertEqual(out.vx, 0.0)
-        self.assertEqual(out.hard_stop, False)
+        self.assertEqual(out.vx, 0.10)
+        self.assertFalse(out.hard_stop)
+        self.assertFalse(out.perception_valid)
 
-    def test_line_loss_after_lock_stops_with_hard_stop(self) -> None:
+    def test_line_loss_after_lock_keeps_straight_command(self) -> None:
         gate = self.make_gate()
         gate.activate(now=1.0)
         gate.update(ControllerCommand(0.05, 0.0, 0.0, "T", True, False), now=1.0)
         out = gate.update(ControllerCommand(0.05, 0.0, 0.0, "T", False, False), now=1.1)
-        self.assertEqual(out.vx, 0.0)
-        self.assertTrue(out.hard_stop)
+        self.assertEqual(out.vx, 0.05)
+        self.assertFalse(out.hard_stop)
+        self.assertFalse(out.perception_valid)
+
+    def test_independent_hard_stop_is_latched(self) -> None:
+        gate = self.make_gate()
+        gate.activate(now=1.0)
+        stopped = gate.update(
+            ControllerCommand(
+                0.50,
+                0.0,
+                0.0,
+                "OBSTACLE_STOP",
+                False,
+                True,
+            ),
+            now=1.0,
+        )
+        self.assertEqual(stopped.vx, 0.0)
+        self.assertTrue(stopped.hard_stop)
+        held = gate.update(
+            ControllerCommand(0.50, 0.0, 0.0, "T", False, False),
+            now=1.1,
+        )
+        self.assertEqual(held.state, "NUM7_STOPPED")
+        self.assertTrue(held.hard_stop)
 
     def test_distance_completion_keeps_zero_and_hard_stop(self) -> None:
         gate = self.make_gate(target_distance_m=0.10, distance_scale=1.0)
@@ -114,6 +142,50 @@ class Walk0p5mGateTest(unittest.TestCase):
         )
         self.assertTrue(stopped.hard_stop)
         self.assertEqual(stopped.vx, 0.0)
+
+
+class StraightFirstNum7IntegrationTest(unittest.TestCase):
+    def test_straight_motion_precedes_visual_correction(self) -> None:
+        controller = LaneFollowerController(
+            LaneFollowerConfig(
+                cruise_speed_mps=0.50,
+                minimum_tracking_speed_mps=0.50,
+                max_forward_accel_mps2=20.0,
+                max_yaw_accel_rps2=20.0,
+            )
+        )
+        gate = Walk0p5mGate()
+        gate.activate(now=0.0)
+
+        for index in range(10):
+            desired = controller.update(
+                DetectionResult(valid=False),
+                now=0.05 * index,
+                heading_hold_error_rad=0.0,
+            )
+            straight = gate.update(desired, now=0.05 * index)
+
+        self.assertEqual(straight.state, "STRAIGHT_IMU_NO_LINE")
+        self.assertEqual(straight.vx, 0.50)
+        self.assertEqual(straight.wz, 0.0)
+        self.assertFalse(straight.hard_stop)
+
+        for index in range(10, 20):
+            desired = controller.update(
+                DetectionResult(
+                    valid=True,
+                    lateral_error=0.35,
+                    confidence=1.0,
+                ),
+                now=0.05 * index,
+                heading_hold_error_rad=0.0,
+            )
+            corrected = gate.update(desired, now=0.05 * index)
+
+        self.assertEqual(corrected.state, "LINE_FOLLOW")
+        self.assertGreater(corrected.vx, 0.0)
+        self.assertLess(corrected.wz, 0.0)
+        self.assertFalse(corrected.hard_stop)
 
 
 class Walk0p5mConfigTest(unittest.TestCase):

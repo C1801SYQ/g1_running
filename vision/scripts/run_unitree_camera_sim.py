@@ -382,7 +382,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    args.num7_target_m = float(min(max(args.num7_target_m, 0.05), 1.00))
+    args.num7_target_m = float(min(max(args.num7_target_m, 0.05), 200.00))
     args.num7_max_duration_s = float(max(args.num7_max_duration_s, 0.1))
     args.num7_distance_scale = float(
         min(max(args.num7_distance_scale, 0.10), 2.0)
@@ -431,8 +431,6 @@ def main() -> None:
     vision_enable_deadline = time.monotonic() + max(0.0, args.vision_enable_delay)
     support_body_id = model.body("torso_link").id
     support_z = float(data.qpos[2])
-    support_x = float(data.qpos[0])
-    support_y = float(data.qpos[1])
     support_yaw = yaw_from_wxyz(data.qpos[3:7])
     robot_mass = float(np.sum(model.body_mass))
     support_active = args.startup_support_seconds > 0.0
@@ -546,27 +544,6 @@ def main() -> None:
             )
             apply_start_heading_restraint(force)
 
-        def apply_start_block_restraint() -> None:
-            force = data.xfrc_applied[support_body_id]
-            force[:] = 0.0
-            force[0] = float(
-                np.clip(
-                    -240.0 * (data.qpos[0] - support_x)
-                    - 90.0 * data.qvel[0],
-                    -220.0,
-                    220.0,
-                )
-            )
-            force[1] = float(
-                np.clip(
-                    -240.0 * (data.qpos[1] - support_y)
-                    - 90.0 * data.qvel[1],
-                    -220.0,
-                    220.0,
-                )
-            )
-            apply_start_heading_restraint(force)
-
         while is_running():
             started = time.perf_counter()
             if args.keep_open_after_finish and race_finished.is_set():
@@ -605,17 +582,13 @@ def main() -> None:
                         )
                         if support_scale > 0.0:
                             apply_full_start_support(support_scale)
-                        elif not lane_lock_acquired.is_set():
-                            # The vertical tether is now gone. Keep only the
-                            # X/Y/yaw starting-block restraint while the
-                            # active mission (Skill 6 or Num7) locks the lane.
-                            apply_start_block_restraint()
                         else:
                             data.xfrc_applied[support_body_id] = 0.0
                             support_active = False
                             print(
                                 "[policy] startup restraint released after "
-                                "mission lane lock",
+                                "policy stabilization; line detection is "
+                                "correction-only",
                                 flush=True,
                             )
                 elif support_active and support_now < support_deadline:
@@ -630,18 +603,12 @@ def main() -> None:
                         np.clip(remaining / fade_seconds, 0.0, 1.0)
                     )
                     apply_full_start_support(support_scale)
-                elif support_active and not lane_lock_acquired.is_set():
-                    # The running policy drifts slightly even for a zero
-                    # velocity command. Keep only an X/Y starting-block
-                    # restraint after the vertical tether has faded out. It
-                    # is released as soon as the active mission (Skill 6 or
-                    # Num7) locks the two target-lane boundaries.
-                    apply_start_block_restraint()
                 elif support_active:
                     data.xfrc_applied[support_body_id] = 0.0
                     support_active = False
                     print(
-                        "[policy] startup restraint released after lane lock",
+                        "[policy] startup restraint released after policy "
+                        "stabilization",
                         flush=True,
                     )
                 mujoco.mj_step(model, data)
@@ -817,27 +784,18 @@ def main() -> None:
             gate: Walk0p5mGate,
         ) -> ControllerCommand:
             nonlocal num7_last_lock_time, num7_start_x, num7_cmd_distance_m
-            # First line lock for Num7: wait until a good two-line pair is
-            # observed, then start the walk. Before the lock output zero and
-            # keep the starting-block restraint engaged.
+            # White-line lock only enables bounded yaw correction. It does not
+            # authorize forward motion; the locomotion policy walks straight
+            # under its IMU heading reference while the detector is searching.
             if num7_last_lock_time is None:
                 if result.valid and not result.boundary_risk:
                     num7_last_lock_time = now
-                    with lock:
-                        num7_start_x = float(data.qpos[0])
-                    # Releasing the X/Y/yaw starting-block restraint is
-                    # gated on this lane lock (shared with Skill 6 so the
-                    # physics loop only lets the robot move once locked).
                     lane_lock_acquired.set()
                     print(
-                        "[vision] Num7 lane locked at "
-                        f"start_x={num7_start_x:.3f} m; releasing starting "
-                        "restraint",
+                        "[vision] Num7 lane locked; enabling white-line yaw "
+                        "correction",
                         flush=True,
                     )
-                return ControllerCommand(
-                    0.0, 0.0, 0.0, "NUM7_WAIT_FOR_LINE", False, False
-                )
             # Depth safety runs only when the RGB-D sensor is enabled; with
             # RGB-only render the depth gate stays clear.
             # Only produce non-zero motion after the physics loop has fully
@@ -849,6 +807,14 @@ def main() -> None:
             if not restraint_released:
                 return ControllerCommand(
                     0.0, 0.0, 0.0, "NUM7_RESTRAINT_ENGAGED", False, False
+                )
+            if num7_start_x is None:
+                with lock:
+                    num7_start_x = float(data.qpos[0])
+                print(
+                    "[num7] straight walk started independently of line "
+                    f"lock at x={num7_start_x:.3f} m",
+                    flush=True,
                 )
             desired = num7_controller.update(result, now=now)
             if args.use_depth:
@@ -944,7 +910,8 @@ def main() -> None:
                     )
                     print(
                         "[vision] C++ FSM confirmed visual sprint mode; "
-                        "waiting for final-height lane lock",
+                        "starting straight after policy stabilization; "
+                        "white-line lock enables correction only",
                         flush=True,
                     )
                 elif not mode_sprint and skill6_enabled.is_set():
@@ -997,7 +964,7 @@ def main() -> None:
                     num7_last_lock_time = None
                     print(
                         "[vision] C++ FSM confirmed Num7 walk mode; "
-                        "waiting for lane lock at 0.50 m/s",
+                        "straight 0.50 m/s motion does not wait for lane lock",
                         flush=True,
                     )
                 elif not mode_walk and num7_enabled.is_set():
@@ -1030,8 +997,8 @@ def main() -> None:
                         f"start_x={fsm_start_x:.3f} m",
                         flush=True,
                     )
-                    # A second Num7 entry must re-run the lock-and-release
-                    # lifecycle from scratch.
+                    # A second Num7 entry must rebuild its visual correction
+                    # reference and distance lifecycle from scratch.
                     lane_lock_acquired.clear()
                     num7_mission_done.clear()
                     num7_last_lock_time = None
@@ -1065,7 +1032,7 @@ def main() -> None:
                         now=now,
                         gate=walk0p5m_gate,
                     )
-                    if num7_last_lock_time is not None and not command.hard_stop:
+                    if num7_start_x is not None and not command.hard_stop:
                         # Integrate the sent safe vx for the report. This is a
                         # commanded-distance estimate, not a measured value.
                         num7_cmd_distance_m += (
@@ -1106,6 +1073,17 @@ def main() -> None:
                         "WAIT_FOR_SKILL6",
                         result.valid,
                     )
+                elif support_active:
+                    # The mechanical startup aid is a policy-stabilization
+                    # guard only. Once it fades, straight motion begins even
+                    # if no white-line pair has been acquired yet.
+                    command = ControllerCommand(
+                        0.0,
+                        0.0,
+                        0.0,
+                        "WAIT_FOR_POLICY_SUPPORT_RELEASE",
+                        result.valid,
+                    )
                 elif now < max(
                     vision_enable_deadline,
                     skill6_ready_at if skill6_ready_at is not None else now,
@@ -1118,6 +1096,19 @@ def main() -> None:
                         result.valid,
                     )
                 else:
+                    sprint_started_now = False
+                    with lock:
+                        if race_timing["started_at"] is None:
+                            race_timing["started_at"] = now
+                            race_timing["start_x"] = float(data.qpos[0])
+                            race_timing["heading_yaw"] = support_yaw
+                            sprint_started_now = True
+                    if sprint_started_now:
+                        print(
+                            "[race] straight sprint started under IMU heading "
+                            "hold; vision remains correction-only",
+                            flush=True,
+                        )
                     if not vision_enabled:
                         # Standing up changes the camera pose substantially.
                         # Select the target lane only after the running policy
@@ -1148,7 +1139,6 @@ def main() -> None:
                             and result.confidence >= 0.50
                             and abs(result.lateral_error) <= 0.25
                         )
-                        controller.reset()
                         if lock_quality_ok:
                             controller.set_visual_heading_reference(
                                 result.heading_error_rad
@@ -1157,17 +1147,6 @@ def main() -> None:
                             detector.set_lateral_reference(lateral_reference)
                             result.lateral_error = 0.0
                             vision_enabled = True
-                            with lock:
-                                race_timing["started_at"] = time.monotonic()
-                                race_timing["start_x"] = float(data.qpos[0])
-                                # The XML start pose is aligned with the race
-                                # straight.  The new running policy can yaw by
-                                # several degrees during the state-1 -> Skill-6
-                                # transition, so capturing that transient as
-                                # the target heading makes the controller hold
-                                # a diagonal course. Keep the immutable
-                                # starting-block heading instead.
-                                race_timing["heading_yaw"] = support_yaw
                             lane_lock_acquired.set()
                             if args.debug_snapshot is not None:
                                 lock_path = (
@@ -1184,22 +1163,20 @@ def main() -> None:
                                 f"lateral reference={lateral_reference:+.3f}; "
                                 "starting-block IMU heading reference="
                                 f"{race_timing['heading_yaw']:+.3f} rad; "
-                                "enabling strict two-line control with "
-                                "acceleration ramp",
+                                "enabling bounded white-line correction",
                                 flush=True,
                             )
                         elif result.valid:
-                            # Never start from a gait-phase frame where the
-                            # apparent lane centre is already near a boundary.
-                            # Keep zero velocity and retry against the same
-                            # averaged orientation on the following frame.
+                            # Do not calibrate correction from a gait-phase
+                            # frame near a boundary. Straight IMU motion keeps
+                            # running while the detector retries.
                             result.valid = False
                             result.source = "lane-lock-wait"
                     finish_approach = False
                     start_x = race_timing["start_x"]
                     heading_reference = race_timing["heading_yaw"]
                     heading_hold_error = None
-                    if vision_enabled and heading_reference is not None:
+                    if heading_reference is not None:
                         with lock:
                             current_yaw = yaw_from_wxyz(data.qpos[3:7])
                         heading_hold_error = wrapped_angle(
@@ -1211,8 +1188,7 @@ def main() -> None:
                         else args.stop_at_x
                     )
                     if (
-                        vision_enabled
-                        and finish_target_x > 0.0
+                        finish_target_x > 0.0
                         and args.finish_approach_distance > 0.0
                         and start_x is not None
                     ):
@@ -1240,7 +1216,7 @@ def main() -> None:
                             now=now,
                             heading_hold_error_rad=heading_hold_error,
                         )
-                    if vision_enabled:
+                    if start_x is not None:
                         with lock:
                             current_y = float(data.qpos[1])
                         race_stats["frames"] += 1

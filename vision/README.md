@@ -16,7 +16,7 @@
 - 训练策略和 G1 IMU 负责跑直线；视觉在中心走廊内不转向，只有横向偏差越过进入阈值才做有界纠偏，回到更小的退出阈值后停止纠偏。
 - 新增 Skill 6：必须先按 `0` 起立、按 `1` 进入稳定站立/运动状态，再按 `6` 进入视觉冲刺；按 `6` 不会自动起立。原 Skill 5 和按键 `5` 保持不变。
 - Skill 5/6 当前共用 gait-v2 `model_175197` 部署策略；安装和编译脚本会校验策略 SHA-256，避免模型与部署配置错配。
-- MuJoCo 启动安全支撑不再按固定 16 秒强制消失；C++ 状态机会通过本机 UDP 确认真正进入 Skill 6，再平滑卸掉垂直支撑并等待真实相机姿态稳定，双线锁定后释放水平起跑约束，人工操作慢也不会因超时倒地。
+- MuJoCo 启动安全支撑不再按固定 16 秒强制消失；C++ 状态机会通过本机 UDP 确认真正进入 Skill 6，再平滑卸掉支撑。支撑释放只依赖策略稳定，不再等待双线锁定；机器人先按 IMU 航向直行，白线可用后才叠加纠偏。
 - 越过 100 m 后继续巡线并平滑减速，视觉 UDP 超过 300 ms 无新数据时强制输出零速度。
 
 ## Num7 初始锁道与真机 CameraInfo
@@ -252,9 +252,13 @@ G1_RUNNING_ROOT="$PWD" \
 bash vision/scripts/run_vm_full_demo.sh
 ```
 
-## Skill 7（Num7）：1.0 m 视觉行走
+## Skill 7（Num7）：100 m 视觉行走
 
-Skill 7 复用状态 1 的 `robomimic/locomotion` 策略，通过 D435i 识别白线，以策略训练分布内的 `0.50 m/s` 沿线前进约 1 米，自动停止并返回状态 1。`WALK0P5M` 仅作为兼容旧版本的 UDP 模式名保留。它**不能**与 Unitree 高层 LocoClient 并行使用。
+Skill 7 复用状态 1 的 `robomimic/locomotion` 策略，以策略训练分布内的 `0.50 m/s` 按 IMU 航向前进；D435i 双白线只在识别有效时提供有界 yaw 纠偏，不再决定是否允许前进。任务随后自动停止并返回状态 1。`WALK0P5M` 仅作为兼容旧版本的 UDP 模式名保留。它**不能**与 Unitree 高层 LocoClient 并行使用。
+
+当前机器人自启动配置面向 100 m 赛程，设置 `G1_NUM7_TARGET_M=110.0` 和
+`G1_NUM7_MAX_DURATION_S=260.0`，用 10 m 目标余量覆盖命令积分误差。手动测试仍建议从
+0.10 m、0.25 m、0.50 m、1.00 m 逐级放大，确认吊起和地面行为后再跑 100 m。
 
 ```text
 Passive ──0──> GetUp ──1──> 状态 1 ──7──> Skill 7 ──完成/超时/故障──> 零速保持 ──> 状态 1
@@ -264,20 +268,23 @@ Passive ──0──> GetUp ──1──> 状态 1 ──7──> Skill 7 ─�
 
 > **任务计时与 FSM 握手**：Python 视觉可以**先于** `rl_real_g1` 启动，但 Num7 的时间和距离累计**只在收到 C++ FSM 的 `G1_VISION_WALK_0P5M 1` 后才开始**（状态端口 15002，C++ 每 0.5 秒周期心跳重发）。按 7 之前 Python 不累计时间、不累计距离、不输出非零命令、不发送会被下一次任务继承的 hard_stop。收到 `G1_VISION_WALK_0P5M 0` 后立即停止输出并清理任务状态。
 
-> **重复任务与跑道硬锁**：每次真实的 `NONE -> WALK0P5M` 上升沿都会在相机回调线程同步重置 detector、controller 和距离 gate，清除上次任务可能留下的 `lane-identity-lost`；500 ms 心跳不会重复重置。本次任务重新锁定初始居中双白线后，lane anchor 保持不变，仍禁止跳到相邻跑道。仿真启动支撑淡出为 0.60 秒，早于 2 秒首条前进命令超时。
+> **重复任务与跑道硬锁**：每次真实的 `NONE -> WALK0P5M` 上升沿都会在相机回调线程同步重置 detector、controller 和距离 gate，清除上次任务可能留下的 `lane-identity-lost`；500 ms 心跳不会重复重置。机器人不等待白线锁定即可按 IMU 航向直行；本次任务一旦确认初始居中双白线，lane anchor 保持不变，仍禁止纠偏目标跳到相邻跑道。仿真启动支撑淡出为 0.60 秒，早于 2 秒首条前进命令超时。
 
 > **重要**：`estimated_distance` 是命令速度的积分估算，**不是**可靠的里程计实测值。真机验收必须以人工测量为准。**修复完成前的旧报告已失效。**
 
 ### 停止条件（任一触发即自动回状态 1）
 
-1. 达到目标距离 / 保守停止点（默认 1.00 m，`G1_NUM7_TARGET_M`，限制 0.05～1.00，C++ 与 Python 两端一致）
-2. 总时长达到 7 秒（`G1_NUM7_MAX_DURATION_S`）
+1. 达到目标距离 / 保守停止点（手动默认 1.00 m，机器人自启动为 110.0 m；`G1_NUM7_TARGET_M`，限制 0.05～200.00，C++ 与 Python 两端一致）
+2. 总时长达到 `G1_NUM7_MAX_DURATION_S`（手动默认按目标距离估算，自启动为 260.0 秒，限制 1.0～600.0）
 3. 2 秒内没有第一条有效运动命令（`G1_NUM7_START_TIMEOUT_S`）
 4. UDP 超过 300 ms 无新命令
 5. Python 报告 hard_stop
 6. 深度缺失 / 过期 / 无效 / 检测到障碍
-7. 已锁线后丢线
-8. 持续收到 NaN、Inf 或非法 UDP 包
+7. 持续收到 NaN、Inf 或非法 UDP 包
+
+白线尚未锁定或中途丢失**不是停车条件**：控制器会输出
+`STRAIGHT_IMU_NO_LINE` / `STRAIGHT_IMU_LINE_LOST`，保持基础前进速度并仅用
+IMU 航向保持直线；重新获得可信双线后恢复视觉纠偏。
 
 > **非法 UDP 包的准确行为**：非法包（NaN/Inf/尾随垃圾/错误 hard_stop 值）会被 C++ 拒绝且**不刷新 watchdog**，也不会改变当前命令、hard_stop、freshness 或 generation 状态——它**不会**单包触发立即 hard-stop。停止由 watchdog 时序决定：
 > - 任务已开始：若之后只收到非法包（没有新的合法命令），最迟 300 ms 后触发 `UDP_STALE`；
@@ -307,6 +314,14 @@ bash vision/scripts/num7_headless_smoke.sh
 `vision/output/num7_headless_smoke/HARDWARE_RELEASE_READY`。新的门禁运行会先删除旧标记，失败时不会留下可用标记。
 
 > **配置变更（2026-08-15）**：旧版 `0.10 m/s / 0.50 m` 配置落在现有 policy 的低速死区，已改为训练范围内的 `0.50 m/s / 1.00 m`。根据当前 policy 两次 MuJoCo 实测，命令积分采用显式 `G1_NUM7_DISTANCE_SCALE=0.60` 标定；它仍不是里程计，是否允许真机以严格门禁的两次实际 qpos 结果为准。
+
+> **100 m 自启动配置（2026-08-17）**：机器人端 user systemd 服务
+> `g1_vision_skill7.service` 已启用 linger 开机启动，执行
+> `vision/scripts/run_skill7_robot.sh`，环境变量为
+> `G1_NUM7_COMMAND_OUTPUT_ENABLED=1`、`G1_NUM7_TARGET_M=110.0`、
+> `G1_NUM7_MAX_DURATION_S=260.0`、`G1_NUM7_DISTANCE_SCALE=0.60`。
+> 开机后服务会自动启动 RealSense、视觉节点和 `rl_real_g1`，但仍需遥控器进入
+> `A -> RB+DPadUp -> LB+DPadLeft`。停止使用 `LB+X`。
 
 > **当前仿真放行状态（2026-08-12）**：严格连续两次门禁通过，FSM 停止时 MuJoCo 实际位移分别为 `0.894 m`、`1.121 m`；两次停止后一秒均为零命令，残余约束力为 0。已生成 `HARDWARE_RELEASE_READY`。这只解除软件/仿真门禁，不代替 Jetson 同步编译、D435i audit、吊起测试和地面人工测距。
 
@@ -340,6 +355,25 @@ G1_ROBOT_INTERFACE=<真机DDS网卡> G1_NUM7_COMMAND_OUTPUT_ENABLED=1 G1_NUM7_TA
 G1_ROBOT_INTERFACE=<真机DDS网卡> G1_NUM7_COMMAND_OUTPUT_ENABLED=1 G1_NUM7_TARGET_M=0.25 bash vision/scripts/run_g1_num7_active.sh
 G1_ROBOT_INTERFACE=<真机DDS网卡> G1_NUM7_COMMAND_OUTPUT_ENABLED=1 G1_NUM7_TARGET_M=0.50 bash vision/scripts/run_g1_num7_active.sh
 G1_ROBOT_INTERFACE=<真机DDS网卡> G1_NUM7_COMMAND_OUTPUT_ENABLED=1 G1_NUM7_TARGET_M=1.00 bash vision/scripts/run_g1_num7_active.sh
+G1_ROBOT_INTERFACE=<真机DDS网卡> G1_NUM7_COMMAND_OUTPUT_ENABLED=1 G1_NUM7_TARGET_M=110.00 G1_NUM7_MAX_DURATION_S=260.0 bash vision/scripts/run_g1_num7_active.sh
+```
+
+### 机器人开机自启动
+
+当前本体使用 user systemd 服务，避免依赖电脑终端：
+
+```bash
+systemctl --user status g1_vision_skill7.service
+journalctl --user -u g1_vision_skill7.service -f
+systemctl --user stop g1_vision_skill7.service
+systemctl --user start g1_vision_skill7.service
+```
+
+开机自动启动依赖：
+
+```bash
+loginctl show-user unitree | grep Linger
+systemctl --user is-enabled g1_vision_skill7.service
 ```
 
 ## 测试
@@ -350,7 +384,7 @@ cd vision
 python -m unittest discover -s tests -v
 ```
 
-125 项测试覆盖严格双线模式、单线拒绝、暗光/色偏、运动模糊、完整相机姿态补偿、不可漂移的相邻跑道硬锁、中心走廊直跑、持续外漂提前确认、纠偏回差、任务重置、视觉丢失保护、终点减速、最新策略 SHA-256、Skill 7 检测器生命周期与安全链，以及事件驱动 Skill 6 起步。
+测试覆盖严格双线模式、单线拒绝、暗光/色偏、运动模糊、完整相机姿态补偿、不可漂移的相邻跑道硬锁、中心走廊直跑、持续外漂提前确认、纠偏回差、任务重置、无白线时 IMU 直行、终点减速、最新策略 SHA-256、Skill 7 检测器生命周期与独立安全链，以及事件驱动 Skill 6 起步。
 
 ## 仿真结果
 

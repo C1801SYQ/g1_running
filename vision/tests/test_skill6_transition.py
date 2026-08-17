@@ -50,7 +50,7 @@ POLICY_REPOSITORY = (
     else VM_REPOSITORY
 )
 POLICY_PATH = POLICY_REPOSITORY / "rl_sar/policy/g1/running/policy.pt"
-POLICY_SHA256 = "5de41b2e247d44db8c1378cc32367227482ab911a640366bc1fc563fda153b57"
+POLICY_SHA256 = "91c8a527760e91654f6224a2927d6319935cf199abadbf117b16e3b35bcb9adc"
 
 
 class Skill6TransitionTests(unittest.TestCase):
@@ -122,7 +122,10 @@ class Skill6TransitionTests(unittest.TestCase):
         self.assertIn("UdpSkill6StatusReceiver", simulator_source)
         self.assertIn('"WAIT_FOR_SKILL6"', simulator_source)
         self.assertIn("skill6_enabled.is_set()", simulator_source)
-        self.assertIn("lane_lock_acquired.is_set()", simulator_source)
+        self.assertIn(
+            '"WAIT_FOR_POLICY_SUPPORT_RELEASE"', simulator_source
+        )
+        self.assertIn("correction-only", simulator_source)
         self.assertIn(
             'race_timing["heading_yaw"] = support_yaw',
             simulator_source,

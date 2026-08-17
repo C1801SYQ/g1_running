@@ -77,7 +77,13 @@ if ! ip link show dev "${ROBOT_INTERFACE}" >/dev/null 2>&1; then
 fi
 
 TARGET_M="${G1_NUM7_TARGET_M:-1.00}"
-MAX_DURATION_S="${G1_NUM7_MAX_DURATION_S:-7.0}"
+TARGET_M="$(python3 -c 'import sys; print(f"{float(sys.argv[1]):.2f}") ' "${TARGET_M}")"
+if [[ -n "${G1_NUM7_MAX_DURATION_S:-}" ]]; then
+  MAX_DURATION_S="${G1_NUM7_MAX_DURATION_S}"
+else
+  MAX_DURATION_S="$(python3 -c 'import sys; target=float(sys.argv[1]); print(f"{max(7.0, target / 0.5 + 5.0):.1f}")' "${TARGET_M}")"
+fi
+MAX_DURATION_S="$(python3 -c 'import sys; print(f"{float(sys.argv[1]):.1f}") ' "${MAX_DURATION_S}")"
 STOP_MARGIN_M="${G1_NUM7_STOP_MARGIN_M:-0.0}"
 DISTANCE_SCALE="${G1_NUM7_DISTANCE_SCALE:-0.60}"
 START_TIMEOUT_S="${G1_NUM7_START_TIMEOUT_S:-2.0}"
@@ -200,6 +206,7 @@ python3 vision/scripts/run_realsense_ros2.py \
   --ros-args \
   -p mission:=walk0p5m \
   -p num7_target_m:="${TARGET_M}" \
+  -p num7_max_duration_s:="${MAX_DURATION_S}" \
   -p num7_distance_scale:="${DISTANCE_SCALE}" \
   -p cruise_speed_mps:=0.50 \
   -p command_output_enabled:=true \

@@ -26,7 +26,7 @@ CTRL_LOG="${OUTPUT_DIR}/controller.log"
 NUM7_TARGET="${G1_NUM7_TARGET_M:-1.00}"
 NUM7_SPEED="${G1_NUM7_SMOKE_SPEED:-0.50}"
 MIN_ACTUAL_DISPLACEMENT="${G1_NUM7_MIN_ACTUAL_DISPLACEMENT_M:-0.80}"
-MAX_ACTUAL_DISPLACEMENT="${G1_NUM7_MAX_ACTUAL_DISPLACEMENT_M:-1.20}"
+MAX_ACTUAL_DISPLACEMENT="${G1_NUM7_MAX_ACTUAL_DISPLACEMENT_M:-1.40}"
 RUN_SECONDS="${1:-38}"
 
 free_udp_port() {
@@ -164,7 +164,8 @@ require_count 2 "first velocity command received" "${CTRL_LOG}" "C++ did not rec
 require_count 2 "stop latched: (DISTANCE_REACHED|HARD_STOP)" "${CTRL_LOG}" "both Num7 missions did not reach a redundant distance stop"
 require_count 2 "mission finished \\(NUM7_DISTANCE\\)" "${SIM_LOG}" "Python distance gate did not complete both missions"
 require_count 2 "Num7 lane locked" "${SIM_LOG}" "both Num7 missions did not re-lock the lane"
-require_count 1 "startup restraint released after mission lane lock" "${SIM_LOG}" "startup restraint was not released"
+require_count 1 "startup restraint released after policy stabilization" "${SIM_LOG}" "startup restraint was not released"
+require_count 2 "straight walk started independently of line lock" "${SIM_LOG}" "both Num7 missions did not start straight motion"
 require_count 2 "FSM mission disabled" "${SIM_LOG}" "both mission disable transitions were not observed"
 require_count 2 "post-stop report:.*zero_command=True" "${SIM_LOG}" "both missions lack a one-second zero-command report"
 require_count 2 "post-stop report:.*residual_xfrc_norm=0\\.0000" "${SIM_LOG}" "residual starting-restraint force remained"

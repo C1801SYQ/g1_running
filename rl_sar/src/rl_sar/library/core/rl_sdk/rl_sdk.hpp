@@ -213,6 +213,12 @@ public:
     void InitRL(std::string robot_config_path);
     void InitJointNum(size_t num_joints);
 
+    // Reset the gait phase-hold state machine.  Must be called whenever a
+    // policy using the "phase_sin_cos" observation (re)starts: after InitRL,
+    // on entering a running/sprint FSM state, and after any MuJoCo reset, so
+    // the initial phase sequence is always identical.
+    void ResetPhaseState();
+
     // rl functions
     virtual std::vector<float> Forward() = 0;
     std::vector<float> ComputeObservation();
@@ -265,6 +271,14 @@ public:
     unsigned long long episode_length_buf = 0;
     float motion_length = 0.0;
     int InverseJointMapping(int idx) const;
+
+    // Gait phase hold state machine (must match the IsaacLab training side and
+    // the Python MuJoCo deployment; see robot_rl/.../mdp/phase_hold.py).
+    float prev_phi = 0.0f;
+    bool should_hold = false;
+    int boundaries_crossed = 0;
+    float hold_phi_value = -1.0f;
+    bool phase_first_step = true;
 
     // Motion tracking (for mimic/dance tasks)
     std::unique_ptr<MotionLoader> motion_loader;

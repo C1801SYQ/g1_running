@@ -6,6 +6,7 @@ import unittest
 import cv2
 import numpy as np
 
+from g1_race_vision.camera_geometry import CameraIntrinsics
 from g1_race_vision.line_detector import LaneDetectorConfig, WhiteLaneDetector
 from g1_race_vision.rendering import (
     attitude_align_rgbd,
@@ -105,6 +106,43 @@ class WhiteLaneDetectorTest(unittest.TestCase):
         result = WhiteLaneDetector().detect(synthetic_lane(shift_px=-70))
         self.assertTrue(result.valid)
         self.assertLess(result.lateral_error, -0.15)
+
+    def test_camera_intrinsics_control_heading_estimate(self):
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        image[:] = (85, 28, 28)
+        # Both boundaries converge at x=380. A calibrated principal point at
+        # that same x means the robot is parallel to the lane even though the
+        # camera is not optically centred in the image.
+        cv2.line(image, (160, 479), (334, 180), (245, 245, 245), 14)
+        cv2.line(image, (600, 479), (427, 180), (245, 245, 245), 14)
+
+        calibrated = WhiteLaneDetector().detect(
+            image,
+            intrinsics=CameraIntrinsics(
+                fx=800.0,
+                fy=800.0,
+                cx=380.0,
+                cy=240.0,
+                width=640,
+                height=480,
+            ),
+        )
+        image_centered = WhiteLaneDetector().detect(
+            image,
+            intrinsics=CameraIntrinsics(
+                fx=800.0,
+                fy=800.0,
+                cx=320.0,
+                cy=240.0,
+                width=640,
+                height=480,
+            ),
+        )
+
+        self.assertTrue(calibrated.valid)
+        self.assertTrue(image_centered.valid)
+        self.assertLess(abs(calibrated.heading_error_rad), 0.01)
+        self.assertGreater(image_centered.heading_error_rad, 0.05)
 
     def test_one_remaining_line_is_invalid_in_strict_two_line_mode(self):
         image = synthetic_lane()

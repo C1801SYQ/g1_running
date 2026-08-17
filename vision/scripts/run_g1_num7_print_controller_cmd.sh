@@ -32,14 +32,18 @@ if ! ip link show dev "${ROBOT_INTERFACE}" >/dev/null 2>&1; then
 fi
 
 TARGET_M="${G1_NUM7_TARGET_M:-1.00}"
-MAX_DURATION_S="${G1_NUM7_MAX_DURATION_S:-7.0}"
+if [[ -n "${G1_NUM7_MAX_DURATION_S:-}" ]]; then
+  MAX_DURATION_S="${G1_NUM7_MAX_DURATION_S}"
+else
+  MAX_DURATION_S="$(python3 -c 'import sys; target=float(sys.argv[1]); print(f"{max(7.0, target / 0.5 + 5.0):.1f}")' "${TARGET_M}")"
+fi
 STOP_MARGIN_M="${G1_NUM7_STOP_MARGIN_M:-0.0}"
 DISTANCE_SCALE="${G1_NUM7_DISTANCE_SCALE:-0.60}"
 START_TIMEOUT_S="${G1_NUM7_START_TIMEOUT_S:-2.0}"
 SETTLE_S="${G1_NUM7_SETTLE_S:-0.5}"
 
 # Clamp the target to the shared 0.05..1.00 range (same as C++ and Python).
-TARGET_M="$(python3 -c 'import sys; v=float(sys.argv[1]); print(f"{min(max(v,0.05),1.00):.3f}")' "${TARGET_M}")"
+TARGET_M="$(python3 -c 'import sys; v=float(sys.argv[1]); print(f"{min(max(v,0.05),200.00):.3f}")' "${TARGET_M}")"
 
 echo "Num7 controller command (run this in the controller terminal):"
 echo "--------------------------------------------------------------------"

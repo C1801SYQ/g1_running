@@ -18,6 +18,7 @@ class LaneFollowerConfig:
     lateral_kp: float = 1.20
     lateral_kd: float = 0.08
     heading_kp: float = 0.20
+    use_visual_heading_correction: bool = False
     imu_heading_kp: float = 1.20
     error_filter_alpha: float = 0.32
     heading_filter_alpha: float = 0.16
@@ -72,6 +73,9 @@ class LaneFollowerConfig:
     max_forward_decel_mps2: float = 3.00
     max_yaw_rate_rps: float = 0.35
     max_yaw_accel_rps2: float = 1.50
+    # Retained for configuration compatibility. Visual availability no longer
+    # gates forward motion: the running policy and IMU own the straight path,
+    # while white lines only add bounded yaw correction when they are valid.
     hold_last_command_s: float = 0.35
     slow_after_lost_s: float = 0.90
     stop_after_lost_s: float = 1.50
@@ -167,7 +171,7 @@ class LaneFollowerController:
                 else 1.0
             )
             # Visual heading is diagnostic only during the straight corridor;
-            # body yaw is held by the IMU reference captured at lane lock.
+            # body yaw is held by the IMU reference captured at mission start.
             heading_scale = 1.0
             imu_heading_scale = self._safety_scale(
                 abs(heading_hold_error_rad or 0.0),
@@ -215,87 +219,20 @@ class LaneFollowerController:
             )
             return ControllerCommand(vx, 0.0, wz, state, True)
 
-        if self._last_valid_time is None:
-            self._previous_wz = self._rate_limit(
-                self._heading_hold_target(heading_hold_error_rad), dt
-            )
-            vx = self._rate_limit_vx(0.0, dt)
-            return ControllerCommand(vx, 0.0, self._previous_wz, "WAIT_FOR_LINE", False)
-
-        lost_for = now - self._last_valid_time
-        if lost_for <= self.config.hold_last_command_s:
-            if (
-                abs(self._filtered_lateral)
-                >= self.config.lateral_slow_start
-            ):
-                desired_heading = self._desired_lane_heading()
-                recovery_wz = -self.config.imu_heading_kp * (
-                    (heading_hold_error_rad or 0.0) - desired_heading
-                )
-                recovery_wz = float(
-                    np.clip(
-                        recovery_wz,
-                        -self.config.max_yaw_rate_rps,
-                        self.config.max_yaw_rate_rps,
-                    )
-                )
-                wz = self._rate_limit(recovery_wz, dt)
-                vx = self._rate_limit_vx(
-                    self.config.minimum_tracking_speed_mps,
-                    dt,
-                )
-                return ControllerCommand(
-                    vx,
-                    0.0,
-                    wz,
-                    "VISION_DROPOUT_BOUNDARY_RECOVERY",
-                    False,
-                )
-            # Zero yaw-rate means keep the current body heading.  Forward speed
-            # is held briefly, preventing a one-frame vision dropout from
-            # causing the locomotion policy to stumble.
-            wz = self._rate_limit(
-                self._heading_hold_target(heading_hold_error_rad), dt
-            )
-            return ControllerCommand(
-                self._previous_vx,
-                0.0,
-                wz,
-                "VISION_DROPOUT_HEADING_HOLD",
-                False,
-            )
-        if lost_for <= self.config.slow_after_lost_s:
-            wz = self._rate_limit(
-                self._heading_hold_target(heading_hold_error_rad), dt
-            )
-            vx = self._rate_limit_vx(
-                self.config.minimum_tracking_speed_mps, dt
-            )
-            return ControllerCommand(
-                vx,
-                0.0,
-                wz,
-                "VISION_DROPOUT_SLOW",
-                False,
-            )
-        if lost_for <= self.config.stop_after_lost_s:
-            wz = self._rate_limit(
-                self._heading_hold_target(heading_hold_error_rad), dt
-            )
-            vx = self._rate_limit_vx(0.0, dt)
-            return ControllerCommand(
-                vx,
-                0.0,
-                wz,
-                "VISION_DROPOUT_BRAKE",
-                False,
-            )
-
+        # White-line perception is correction-only. Before the first lock and
+        # during any later dropout, keep following the immutable IMU heading
+        # and ramp toward the policy's normal straight-line speed. Independent
+        # depth, command-freshness, distance, timeout and E-stop gates remain
+        # responsible for stopping the robot.
         wz = self._rate_limit(
             self._heading_hold_target(heading_hold_error_rad), dt
         )
-        vx = self._rate_limit_vx(0.0, dt)
-        state = "FAILSAFE_STOP" if vx <= 1e-3 else "FAILSAFE_BRAKE"
+        vx = self._rate_limit_vx(self.config.cruise_speed_mps, dt)
+        state = (
+            "STRAIGHT_IMU_NO_LINE"
+            if self._last_valid_time is None
+            else "STRAIGHT_IMU_LINE_LOST"
+        )
         return ControllerCommand(vx, 0.0, wz, state, False)
 
     def follow_lane_through_finish(
@@ -387,7 +324,15 @@ class LaneFollowerController:
         # Do not continuously steer from the camera's visual heading. The
         # trained running policy plus IMU heading hold produce the straight
         # trajectory; vision only supplies the bounded lateral recovery angle.
-        raw_wz = -(self.config.imu_heading_kp * heading_error)
+        visual_heading_wz = (
+            -self.config.heading_kp * self._filtered_heading
+            if self.config.use_visual_heading_correction
+            else 0.0
+        )
+        raw_wz = (
+            -(self.config.imu_heading_kp * heading_error)
+            + visual_heading_wz
+        )
         saturated = (
             abs(raw_wz)
             >= self.config.yaw_saturation_ratio
@@ -626,6 +571,8 @@ class Walk0p5mConfig:
     # Open-loop calibration only; this is not measured odometry.
     distance_scale: float = 0.60
     max_duration_s: float = 7.0
+    # Kept for compatibility with existing launch files. Line loss no longer
+    # stops Num7; independent safety gates still latch hard stops.
     stop_after_lost_s: float = 0.30
 
 
@@ -634,8 +581,9 @@ class Walk0p5mGate:
 
     This is a secondary guard on top of the C++ FSM: it re-clamps vx/vy/wz,
     integrates the *sent* safe vx, latches zero + hard_stop on distance,
-    timeout, visual loss or depth failure, and keeps sending zero after a
-    stop. The C++ FSM remains the owner of the final state lifecycle.
+    timeout or an independent safety failure, and keeps sending zero after a
+    stop. White-line validity is deliberately not a motion gate: the policy
+    walks straight under IMU heading hold when vision is unavailable.
 
     The gate has an explicit lifecycle. It does NOT start counting when
     constructed: time and distance accumulate only after ``activate()`` is
@@ -659,7 +607,6 @@ class Walk0p5mGate:
         self._distance_m = 0.0
         self._start_time: float | None = None
         self._last_time: float | None = None
-        self._last_valid_time: float | None = None
 
     def activate(self, now: float | None = None) -> None:
         """Start a fresh Num7 mission. Time/distance reset to zero."""
@@ -670,7 +617,6 @@ class Walk0p5mGate:
         now = time.monotonic() if now is None else float(now)
         self._start_time = now
         self._last_time = None
-        self._last_valid_time = None
 
     def deactivate(self) -> None:
         """Leave the Num7 mission: output zero, clear all task state so the
@@ -714,23 +660,20 @@ class Walk0p5mGate:
                 self.config.max_wz_rps,
             )
         )
+        if desired.hard_stop:
+            self._stopped = True
+            return ControllerCommand(
+                0.0,
+                0.0,
+                0.0,
+                desired.state,
+                desired.perception_valid,
+                True,
+            )
+
         clamped = ControllerCommand(
             vx, 0.0, vz, desired.state, desired.perception_valid, False
         )
-
-        # Lost-line rule for Num7: once locked, any loss stops immediately.
-        # Before the first lock we wait for the C++ start timeout (zero speed).
-        if not clamped.perception_valid:
-            if self._last_valid_time is None:
-                # Never seen a line yet: hold zero, wait for lock.
-                return ControllerCommand(
-                    0.0, 0.0, 0.0, "NUM7_WAIT_FOR_LINE", False, False
-                )
-            return ControllerCommand(
-                0.0, 0.0, 0.0, "NUM7_LINE_LOST", False, True
-            )
-
-        self._last_valid_time = now
 
         # Integrate the sent safe vx (Python redundancy).
         if self._started:

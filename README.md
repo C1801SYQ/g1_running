@@ -8,29 +8,47 @@
 
 在 G1 21 自由度跑步策略基础上扩展为 **29 自由度**全身跑步，训练策略实现 0~5.1 m/s 变速跑步 + 转向，并通过 rl_sar 框架部署到 MuJoCo 仿真和实体机器人。
 
-**当前成果：** 部署策略来自
+**已验收成果：** 稳定部署策略来自
 `2026-08-12_13-11-17_gait_v2_finish_175198/model_175197.pt`，支持
 0~5.1 m/s 速度命令、转向和视觉百米冲刺。最近一次 Skill 6 MuJoCo
 实测完成 100 m 用时 **27.36 s**、平均速度 **3.65 m/s**，双线识别率
 0.965，最大横向偏移 0.758 m。
 
+当前工作分支已部署 smooth_175600 policy，并新增低中速跑步清理训练任务；回合
+并主线前仍需按 `docs/BRANCHES.md` 拆分提交和回归验证。
+
 > checkpoint 编号只在各自运行目录内有意义。当前 `model_175197` 与历史上
 > 站姿异常的同编号模型不是同一文件；部署策略 SHA256 为
 > `5de41b2e247d44db8c1378cc32367227482ab911a640366bc1fc563fda153b57`。
 
-## 当前状态（2026-08-12）
+## 项目导航
+
+| 入口 | 用途 |
+|------|------|
+| [`robot_rl/README.md`](robot_rl/README.md) | Isaac Lab 训练、策略导出和 sim2sim |
+| [`rl_sar/README.md`](rl_sar/README.md) | C++/MuJoCo/实体机器人部署框架 |
+| [`vision/README.md`](vision/README.md) | Skill 6/7 视觉循迹、仿真与真机流程 |
+| [`docs/REPOSITORY_LAYOUT.md`](docs/REPOSITORY_LAYOUT.md) | 仓库目录职责、生成物边界和新增文件规范 |
+| [`docs/BRANCHES.md`](docs/BRANCHES.md) | 分支职责、当前分叉状态和清理建议 |
+| [`vision/scripts/README.md`](vision/scripts/README.md) | 视觉脚本索引与安全级别 |
+| [`robot_rl/scripts/README.md`](robot_rl/scripts/README.md) | 训练、导出及工具脚本索引 |
+| [`docs/REPOSITORY_CLEANUP.md`](docs/REPOSITORY_CLEANUP.md) | 本地生成物、备份和外部克隆的清理建议 |
+
+## 当前状态（2026-08-17）
 
 | 项目 | 状态 |
 |------|------|
-| 当前部署策略 | `rl_sar/policy/g1/running/policy.pt`，gait_v2 `model_175197` |
+| 主线稳定基线 | `main` 已合入 Skill 7 视觉更新；历史稳定部署为 gait_v2 `model_175197` |
+| 当前工作分支 | `repository-cleanup`，领先 `main` 4 个提交，包含 smooth_175600 policy、低速续训任务和仓库整理文档 |
+| 当前部署策略（工作区） | `rl_sar/policy/g1/running/policy.pt`，SHA256 `91c8a527760e91654f6224a2927d6319935cf199abadbf117b16e3b35bcb9adc` |
 | 速度范围 | `vx=0~5.1 m/s`、`vy=±0.75 m/s`、`wz=±1.5 rad/s` |
-| 视觉实测 | 100 m / 27.36 s / 3.65 m/s，`max_abs_y=0.758 m` |
-| 正在续训 | gait_v3：175197 → 约 195197，2048 env，目标为平顺过渡、改善内八字和高速直线性 |
-| 训练服务 | `g1-running-gait-v3-195198.service`（systemd user service） |
-| 训练日志 | `/home/ubuntu/robot_rl/train_gait_v3_transition_straight.log` |
+| 已记录视觉实测 | gait_v2：100 m / 27.36 s / 3.65 m/s，`max_abs_y=0.758 m` |
+| 当前训练方向 | low/mid-speed cleanup：偏重 0.3~3.0 m/s 低中速跑步，保留少量 3.0~5.1 m/s 高速采样 |
+| 机器人自启动 | 本体 user systemd `g1_vision_skill7.service` 已配置为开机启动 Skill 7，目标 `110 m / 260 s`，覆盖 100 m 赛程 |
+| 分支整理 | 详见 `docs/BRANCHES.md`；旧视觉审计分支已合入主线，可确认后归档/删除 |
 
-当前部署模型已经通过视觉测试；gait_v3 新奖励仍在训练中，完成、导出和
-MuJoCo 回归测试之前不会自动替换部署策略。
+当前工作分支仍有未提交改动；合并回 `main` 前建议把文档整理、policy 部署、
+训练配置和视觉脚本改动拆成独立提交，方便回滚和真机行为定位。
 
 ---
 
@@ -65,13 +83,21 @@ MuJoCo 回归测试之前不会自动替换部署策略。
 │   │   └── standrun/            # 站立+跑步模型
 │   └── trajectories/running/    # 跑步步态轨迹库 (1.2~5.0 m/s)
 │
-└── rl_sar/                      # 仿真部署框架 (C++/Python)
+├── rl_sar/                      # 仿真部署框架 (C++/Python)
     ├── policy/g1/running/       # ★ 当前部署策略及参数
     ├── src/rl_sar/              # 核心代码
     │   ├── fsm_robot/fsm_g1.hpp # G1 状态机 (含跑步策略状态)
     │   ├── library/core/rl_sdk/ # RL SDK (观测/输出/PID)
     │   └── src/rl_sim_mujoco.cpp # MuJoCo 仿真器
-    └── cmake_build/bin/         # 编译产物
+│   └── cmake_build/bin/         # 本地编译产物（不提交）
+│
+├── vision/                      # Skill 6/7 视觉感知与任务编排
+│   ├── scripts/                 # 仿真、真机、审计、安装入口
+│   ├── tests/                   # 视觉/安全/任务生命周期测试
+│   ├── integrations/            # rl_sar 与审计桥集成
+│   └── docs/                    # 真机证据与专题报告
+│
+└── docs/                        # 仓库级结构和协作规范
 ```
 
 ---

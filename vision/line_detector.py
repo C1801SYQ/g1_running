@@ -76,6 +76,7 @@ class LaneDetectorConfig:
     boundary_warning_lateral_error: float = 0.40
     boundary_recovery_lateral_error: float = 0.30
     boundary_breach_confirm_frames: int = 30
+    correction_only_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -184,7 +185,11 @@ class WhiteLaneDetector:
         if active and not self._num7_mission_active:
             self.reset()
             self._num7_mission_active = True
-            self._mission_state = "INITIAL_LOCK"
+            self._mission_state = (
+                "LOCKED"
+                if self.config.correction_only_mode
+                else "INITIAL_LOCK"
+            )
             self._lock_confirm_count = 0
             self._lock_confirm_history.clear()
         elif not active and self._num7_mission_active:
@@ -296,7 +301,12 @@ class WhiteLaneDetector:
                 value_threshold,
                 pair_source,
                 focal_px=(
-                    intrinsics.focal_px
+                    intrinsics.fx
+                    if intrinsics is not None
+                    else None
+                ),
+                principal_x_px=(
+                    intrinsics.cx
                     if intrinsics is not None
                     else None
                 ),
@@ -1290,6 +1300,7 @@ class WhiteLaneDetector:
         value_threshold: float,
         source: str,
         focal_px: Optional[float] = None,
+        principal_x_px: Optional[float] = None,
     ) -> DetectionResult:
         left_bottom = left.x_at(bottom_y)
         right_bottom = right.x_at(bottom_y)
@@ -1310,7 +1321,15 @@ class WhiteLaneDetector:
                 focal_px = (0.5 * height) / np.tan(
                     np.radians(0.5 * self.config.vertical_fov_degrees)
                 )
-            heading_error = np.arctan2(vanishing_x - 0.5 * width, focal_px)
+            optical_center_x = (
+                float(principal_x_px)
+                if principal_x_px is not None
+                else 0.5 * width
+            )
+            heading_error = np.arctan2(
+                vanishing_x - optical_center_x,
+                focal_px,
+            )
         else:
             heading_error = np.arctan2(
                 center_top - center_bottom, bottom_y - lookahead_y

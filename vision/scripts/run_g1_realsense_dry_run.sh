@@ -9,6 +9,13 @@ CAMERA_PID=""
 AUDIT_UDP_ENABLED="${G1_AUDIT_UDP_ENABLED:-false}"
 AUDIT_MISSION="${G1_AUDIT_MISSION:-walk0p5m}"
 TARGET_M="${G1_NUM7_TARGET_M:-1.00}"
+TARGET_M="$(python3 -c 'import sys; print(f"{float(sys.argv[1]):.2f}") ' "${TARGET_M}")"
+if [[ -n "${G1_NUM7_MAX_DURATION_S:-}" ]]; then
+  MAX_DURATION_S="${G1_NUM7_MAX_DURATION_S}"
+else
+  MAX_DURATION_S="$(python3 -c 'import sys; target=float(sys.argv[1]); print(f"{max(7.0, target / 0.5 + 5.0):.1f}")' "${TARGET_M}")"
+fi
+MAX_DURATION_S="$(python3 -c 'import sys; print(f"{float(sys.argv[1]):.1f}") ' "${MAX_DURATION_S}")"
 DISTANCE_SCALE="${G1_NUM7_DISTANCE_SCALE:-0.60}"
 CRUISE_SPEED_MPS="${G1_VISION_CRUISE_SPEED_MPS:-0.50}"
 
@@ -82,6 +89,7 @@ python3 vision/scripts/run_realsense_ros2.py \
   --ros-args \
   -p mission:="${AUDIT_MISSION}" \
   -p num7_target_m:="${TARGET_M}" \
+  -p num7_max_duration_s:="${MAX_DURATION_S}" \
   -p num7_distance_scale:="${DISTANCE_SCALE}" \
   -p cruise_speed_mps:="${CRUISE_SPEED_MPS}" \
   -p command_output_enabled:=false \

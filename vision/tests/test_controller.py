@@ -7,6 +7,28 @@ from g1_race_vision.line_detector import DetectionResult
 
 
 class LaneFollowerControllerTest(unittest.TestCase):
+    def test_enabled_visual_heading_generates_bounded_yaw_correction(self):
+        controller = LaneFollowerController(
+            LaneFollowerConfig(
+                use_visual_heading_correction=True,
+                heading_filter_alpha=1.0,
+                max_visual_heading_rate_rps=100.0,
+                max_yaw_accel_rps2=100.0,
+            )
+        )
+
+        command = controller.update(
+            DetectionResult(
+                valid=True,
+                heading_error_rad=0.20,
+                confidence=1.0,
+            ),
+            now=0.0,
+        )
+
+        self.assertLess(command.wz, 0.0)
+        self.assertLessEqual(abs(command.wz), controller.config.max_yaw_rate_rps)
+
     def test_center_corridor_ignores_visual_sway_and_runs_straight(self):
         controller = LaneFollowerController(
             LaneFollowerConfig(
@@ -148,13 +170,32 @@ class LaneFollowerControllerTest(unittest.TestCase):
             command = controller.update(result, now=0.05 * index)
         self.assertGreater(command.wz, 0.0)
 
-    def test_long_line_loss_stops(self):
+    def test_no_initial_line_starts_straight_under_imu_hold(self):
+        controller = LaneFollowerController()
+        first = controller.update(
+            DetectionResult(valid=False),
+            now=0.0,
+            heading_hold_error_rad=0.1,
+        )
+
+        self.assertEqual(first.state, "STRAIGHT_IMU_NO_LINE")
+        self.assertGreater(first.vx, 0.0)
+        self.assertLess(first.wz, 0.0)
+        self.assertFalse(first.perception_valid)
+
+    def test_long_line_loss_continues_straight_under_imu_hold(self):
         controller = LaneFollowerController()
         valid = DetectionResult(valid=True, confidence=1.0)
-        controller.update(valid, now=0.0)
-        stopped = controller.update(DetectionResult(valid=False), now=2.0)
-        self.assertEqual(stopped.state, "FAILSAFE_STOP")
-        self.assertEqual(stopped.vx, 0.0)
+        for index in range(20):
+            running = controller.update(valid, now=0.1 * index)
+        lost = controller.update(
+            DetectionResult(valid=False),
+            now=5.0,
+            heading_hold_error_rad=0.1,
+        )
+        self.assertEqual(lost.state, "STRAIGHT_IMU_LINE_LOST")
+        self.assertAlmostEqual(lost.vx, running.vx)
+        self.assertLess(lost.wz, 0.0)
 
     def test_forward_speed_ramps_up(self):
         controller = LaneFollowerController()
@@ -173,11 +214,11 @@ class LaneFollowerControllerTest(unittest.TestCase):
 
         lost = controller.update(DetectionResult(valid=False), now=1.95)
 
-        self.assertEqual(lost.state, "VISION_DROPOUT_HEADING_HOLD")
+        self.assertEqual(lost.state, "STRAIGHT_IMU_LINE_LOST")
         self.assertAlmostEqual(lost.vx, command.vx)
         self.assertGreater(lost.vx, controller.config.minimum_tracking_speed_mps)
 
-    def test_sustained_dropout_decelerates_smoothly_then_stops(self):
+    def test_sustained_dropout_keeps_cruise_speed(self):
         controller = LaneFollowerController()
         valid = DetectionResult(valid=True, confidence=1.0)
         for index in range(20):
@@ -190,15 +231,12 @@ class LaneFollowerControllerTest(unittest.TestCase):
             )
             speeds.append(lost.vx)
 
-        per_step_limit = controller.config.max_forward_decel_mps2 * 0.1
+        self.assertTrue(all(speed > 0.0 for speed in speeds))
         self.assertTrue(
-            all(
-                before - after <= per_step_limit + 1e-9
-                for before, after in zip([command.vx] + speeds, speeds)
-            )
+            all(after >= before - 1e-9 for before, after in zip(speeds, speeds[1:]))
         )
-        self.assertEqual(lost.state, "FAILSAFE_STOP")
-        self.assertEqual(lost.vx, 0.0)
+        self.assertEqual(lost.state, "STRAIGHT_IMU_LINE_LOST")
+        self.assertAlmostEqual(lost.vx, controller.config.cruise_speed_mps)
 
     def test_finish_approach_keeps_lane_correction_active(self):
         controller = LaneFollowerController()

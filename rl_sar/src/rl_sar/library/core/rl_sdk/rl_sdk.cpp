@@ -4,6 +4,7 @@
  */
 
 #include "rl_sdk.hpp"
+#include "phase_hold.hpp"
 
 void RL::StateController(const RobotState<float>* state, RobotCommand<float>* command)
 {
@@ -167,11 +168,35 @@ std::vector<float> RL::ComputeObservation()
         }
         else if (observation == "phase_sin_cos")
         {
-            // Running gait phase: sin(2π·φ) and cos(2π·φ)
-            // φ advances continuously with time
-            float total_time = this->params.Get<float>("phase_period");
+            // Running gait phase: sin(2π·φ) and cos(2π·φ), held at a boundary
+            // while standing (matches the IsaacLab training and the Python
+            // MuJoCo deployment; see robot_rl/.../mdp/phase_hold.py).
+            float phase_period = this->params.Get<float>("phase_period", 1.0f);
             float motion_time = this->episode_length_buf * this->params.Get<float>("dt") * this->params.Get<int>("decimation");
-            float phase = std::fmod(motion_time, total_time) / total_time;
+            float raw_phi = std::fmod(motion_time, phase_period) / phase_period;
+
+            float hold_threshold = this->params.Get<float>("phase_hold_threshold", 0.1f);
+            int phasing_boundaries = this->params.Get<int>("phase_boundaries", 4);
+
+            float cmd_vx = this->obs.commands.empty() ? 0.0f : this->obs.commands[0];
+            bool should_hold = std::fabs(cmd_vx) < hold_threshold;
+            bool prev_should_hold = this->should_hold;
+            bool episode_reset = this->phase_first_step;
+            this->phase_first_step = false;
+
+            float phase = rl_sar_phase::PhaseHoldStep(
+                this->prev_phi,
+                raw_phi,
+                prev_should_hold,
+                should_hold,
+                this->boundaries_crossed,
+                this->hold_phi_value,
+                episode_reset,
+                phasing_boundaries);
+
+            this->prev_phi = phase;
+            this->should_hold = should_hold;
+
             float sin_phase = std::sin(2.0f * M_PI * phase);
             float cos_phase = std::cos(2.0f * M_PI * phase);
             std::vector<float> phase_vec = {sin_phase, cos_phase};
@@ -192,6 +217,15 @@ std::vector<float> RL::ComputeObservation()
     }
     std::vector<float> clamped_obs = clamp(obs, -this->params.Get<float>("clip_obs"), this->params.Get<float>("clip_obs"));
     return clamped_obs;
+}
+
+void RL::ResetPhaseState()
+{
+    this->prev_phi = 0.0f;
+    this->should_hold = false;
+    this->boundaries_crossed = 0;
+    this->hold_phi_value = -1.0f;
+    this->phase_first_step = true;
 }
 
 void RL::InitObservations()
@@ -248,6 +282,16 @@ void RL::InitRL(std::string robot_config_path)
 
     this->ReadYaml(robot_config_path, "config.yaml");
 
+    // The gait-phase parameters must be present in the config (synced from
+    // policy_parameters.yaml by scripts/rsl_rl/sync_phase_to_cpp_config.py).
+    // Warn (and use compatibility defaults) if any field is missing.
+    if (!this->params.Has("phase_period"))
+        std::cout << LOGGER::WARNING << "config.yaml missing 'phase_period'; using default 1.0 (phase may desync from training)" << std::endl;
+    if (!this->params.Has("phase_hold_threshold"))
+        std::cout << LOGGER::WARNING << "config.yaml missing 'phase_hold_threshold'; using default 0.1" << std::endl;
+    if (!this->params.Has("phase_boundaries"))
+        std::cout << LOGGER::WARNING << "config.yaml missing 'phase_boundaries'; using default 4" << std::endl;
+
     // init joint num first
     this->InitJointNum(this->params.Get<int>("num_of_dofs"));
 
@@ -255,6 +299,9 @@ void RL::InitRL(std::string robot_config_path)
     this->InitObservations();
     this->InitOutputs();
     this->InitControl();
+
+    // Reset the gait phase-hold state whenever a policy is (re)loaded/switched.
+    this->ResetPhaseState();
 
     // init obs history
     const auto& observations_history = this->params.Get<std::vector<int>>("observations_history");  // avoid dangling reference
