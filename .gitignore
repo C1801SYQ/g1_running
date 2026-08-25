@@ -19,10 +19,6 @@ docs/PROJECT_INTRO.md
 # Context memory (context-manager skill)
 context-memory/
 
-<<<<<<< HEAD
-# Local AI tooling / skills - never publish
-.opencode/
-=======
 # Local build, backup, and runtime artifacts
 rl_sar/backups/
 deployment_backups/
@@ -49,4 +45,3 @@ robot_rl/scripts/env_check/*.txt
 robot_rl/evaluations_*/
 robot_rl/logs/
 robot_rl/outputs/
->>>>>>> b35bcd7 (sync running deployment and vision release baseline)
