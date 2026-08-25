@@ -10,6 +10,7 @@
 | `run_vm_full_demo.sh` | x86/VM | Skill 6 联合 MuJoCo + 视觉仿真 | 仅仿真 |
 | `run_num7_full_demo.sh` | x86/VM | Skill 7 联合仿真 | 仅仿真 |
 | `run_g1_realsense_audit.sh` | Jetson | D435i + 深度安全 + audit bridge | 不发送机器人命令 |
+| `run_skill6_realsense_prepare.sh` | Jetson | Skill 6 RealSense dry-run 准备 | 不发送机器人命令 |
 | `run_g1_num7_active.sh` | Jetson | Skill 7 真机视觉输出 | **可运动，需要显式 opt-in** |
 | `run_g1_num7_print_controller_cmd.sh` | Jetson | 打印匹配的控制器命令 | 不启动任何进程 |
 | `view_num7_camera.py` | Jetson/NoMachine | 实时查看带标注画面 | 只读 |
@@ -31,6 +32,7 @@
 | `build_skill6.sh` | 校验 policy 后构建 `rl_real_g1` |
 | `smoke_test_g1_running.sh` | g1_running 快速回归 |
 | `num7_headless_smoke.sh` | Num7 双任务 headless 位移与停止门禁 |
+| `skill6_headless_smoke.sh` | Skill 6 headless 100 m 仿真门禁 |
 | `run_g1_realsense_dry_run.sh` | 相机和视觉 dry-run，强制关闭机器人输出 |
 
 ## 环境与安装
@@ -56,6 +58,7 @@
 ## 安全规则
 
 1. `audit`、`dry_run`、`view` 不得启动真实控制器。
-2. 真机 active 脚本必须保留显式 opt-in、release marker 和物理 DDS 网卡检查。
-3. `rl_real_g1` 与视觉终端的 Num7 参数必须一致。
-4. 首次测试必须吊起机器人，实体急停在手边。
+2. Skill 6 当前只有仿真和 prepare-only 入口；不得新增本体 active 或 systemd 自启动入口。
+3. 真机 active 脚本必须保留显式 opt-in、release marker 和物理 DDS 网卡检查。
+4. `rl_real_g1` 与视觉终端的 Num7 参数必须一致。
+5. 首次测试必须吊起机器人，实体急停在手边。
