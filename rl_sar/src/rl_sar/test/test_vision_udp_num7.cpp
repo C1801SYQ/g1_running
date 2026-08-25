@@ -318,8 +318,8 @@ void TestEndToEndSmoke()
         vx = 5.0f; vy = 2.0f; wz = 5.0f;
         const bool applied = receiver.Apply(vx, vy, wz);
         CHECK(applied);
-        // Num7 hard caps: vx in [0, 0.50], vy=0, |wz|<=0.25.
-        if (vx > 0.0f && vx <= 0.50f && vy == 0.0f &&
+        // Num7 hard caps: vx in [0, 2.50], vy=0, |wz|<=0.25.
+        if (vx > 0.0f && vx <= 2.50f && vy == 0.0f &&
             std::fabs(wz) <= 0.25f)
         {
             saw_clamped = true;

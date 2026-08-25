@@ -301,9 +301,12 @@ class WhiteLaneDetectorTest(unittest.TestCase):
         self.assertTrue(after.valid)
         self.assertLess(abs(after.lateral_error), 0.03)
 
-    def test_confirmed_boundary_breach_cannot_relock_without_reset(self):
+    def test_confirmed_boundary_breach_reacquires_only_by_continuous_return(self):
         detector = WhiteLaneDetector(
-            LaneDetectorConfig(boundary_breach_confirm_frames=3)
+            LaneDetectorConfig(
+                boundary_breach_confirm_frames=3,
+                identity_reacquire_confirm_frames=3,
+            )
         )
         self.assertTrue(detector.detect(synthetic_lane()).valid)
 
@@ -321,12 +324,17 @@ class WhiteLaneDetectorTest(unittest.TestCase):
 
         self.assertFalse(result.valid)
         self.assertEqual(result.source, "lane-identity-lost")
+
         still_locked_out = detector.detect(synthetic_lane())
         self.assertFalse(still_locked_out.valid)
         self.assertEqual(still_locked_out.source, "lane-identity-lost")
 
-        detector.reset()
-        self.assertTrue(detector.detect(synthetic_lane()).valid)
+        recovering = None
+        for shift in (110, 90, 70):
+            recovering = detector.detect(synthetic_lane(shift_px=shift))
+        self.assertIsNotNone(recovering)
+        self.assertTrue(recovering.valid)
+        self.assertEqual(recovering.source, "two-lines-reacquired")
 
     def test_imu_roll_alignment_restores_shaken_lane_geometry(self):
         image = synthetic_lane()

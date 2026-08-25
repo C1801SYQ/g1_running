@@ -42,6 +42,8 @@ ENV_SCRIPT_PATH = VISION_ROOT / "scripts/activate_g1race_dds.sh"
 SIM_SCRIPT_PATH = VISION_ROOT / "scripts/run_unitree_camera_sim.py"
 INSTALL_SCRIPT_PATH = VISION_ROOT / "scripts/install_g1_running.sh"
 BUILD_SCRIPT_PATH = VISION_ROOT / "scripts/build_skill6.sh"
+PREPARE_SCRIPT_PATH = VISION_ROOT / "scripts/run_skill6_realsense_prepare.sh"
+DRY_RUN_SCRIPT_PATH = VISION_ROOT / "scripts/run_g1_realsense_dry_run.sh"
 POLICY_REPOSITORY = (
     REPOSITORY_CANDIDATE
     if (
@@ -50,7 +52,11 @@ POLICY_REPOSITORY = (
     else VM_REPOSITORY
 )
 POLICY_PATH = POLICY_REPOSITORY / "rl_sar/policy/g1/running/policy.pt"
-POLICY_SHA256 = "91c8a527760e91654f6224a2927d6319935cf199abadbf117b16e3b35bcb9adc"
+POLICY_SHA256 = "c4890005e430895feeb1aa8a80fa71f5e7fe96f7c7b45652bb709807d24930b2"
+RUNNING_ADAPTER_PATH = (
+    REPOSITORY_CANDIDATE
+    / "rl_sar/src/rl_sar/fsm_robot/fsm_g1_running_adapter.hpp"
+)
 
 
 class Skill6TransitionTests(unittest.TestCase):
@@ -67,18 +73,14 @@ class Skill6TransitionTests(unittest.TestCase):
         )
 
     def test_num6_has_exactly_one_fsm_entry(self) -> None:
-        source = FSM_PATH.read_text(encoding="utf-8")
-        self.assertEqual(source.count("Input::Keyboard::Num6"), 1)
-
-        if USING_PATCH_ARTIFACT:
-            self.assertIn("RLFSMStateRLRoboMimicLocomotion", source)
-            self.assertIn('return "RLFSMStateRLVisionSprint100m";', source)
-        else:
-            state1 = source.split(
-                "class RLFSMStateRLRoboMimicLocomotion", 1
-            )[1].split("class RLFSMStateRLRoboMimicCharleston", 1)[0]
-            self.assertIn("Input::Keyboard::Num6", state1)
-            self.assertIn('return "RLFSMStateRLVisionSprint100m";', state1)
+        if not RUNNING_ADAPTER_PATH.is_file():
+            self.skipTest("running adapter is unavailable in patch-only mode")
+        source = RUNNING_ADAPTER_PATH.read_text(encoding="utf-8")
+        state1 = source.split(
+            "class RLFSMStateLocomotionRunning", 1
+        )[1].split("class RLFSMStateRunning", 1)[0]
+        self.assertEqual(state1.count("Input::Keyboard::Num6"), 1)
+        self.assertIn('return "RLFSMStateRLRunningStraight110m";', state1)
 
     def test_automatic_skill6_launch_is_removed(self) -> None:
         fsm_source = FSM_PATH.read_text(encoding="utf-8")
@@ -132,6 +134,9 @@ class Skill6TransitionTests(unittest.TestCase):
         )
         self.assertIn("--startup-support-until-skill6", run_source)
         self.assertIn("G1_SKILL6_STABILIZE_SECONDS:-0.60", run_source)
+        self.assertIn("G1_SKILL6_RAMP_TO_1:-0.60", run_source)
+        self.assertIn("G1_SKILL6_RAMP_TO_3:-0.80", run_source)
+        self.assertIn("G1_SKILL6_RAMP_TO_MAX:-1.00", run_source)
         self.assertIn("max_camera_reference_samples", simulator_source)
         self.assertIn("G1_RACE_ACCEL:-3.00", run_source)
         self.assertIn("--vision-enable-delay 0.0", run_source)
@@ -146,6 +151,35 @@ class Skill6TransitionTests(unittest.TestCase):
         self.assertIn("G1_VISION_MAX_WZ", run_source)
         self.assertIn("G1_VISION_SPRINT 1", command_source)
         self.assertIn("G1_VISION_STATUS_PORT", command_source)
+
+    def test_skill6_speed_ramp_starts_after_fsm_enable(self) -> None:
+        simulator_source = SIM_SCRIPT_PATH.read_text(encoding="utf-8")
+        realsense_source = (
+            VISION_ROOT / "scripts/run_realsense_ros2.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("sprint_ramp_started_at = now", simulator_source)
+        self.assertIn("sprint_speed_cap", simulator_source)
+        self.assertIn("Sprint FSM enable received", realsense_source)
+        self.assertIn('"WAIT_FOR_SKILL6"', realsense_source)
+        self.assertIn("clamp_command_vx", realsense_source)
+
+    def test_skill6_prepare_is_dry_run_only(self) -> None:
+        prepare_source = PREPARE_SCRIPT_PATH.read_text(encoding="utf-8")
+        dry_run_source = DRY_RUN_SCRIPT_PATH.read_text(encoding="utf-8")
+        scripts_readme = (VISION_ROOT / "scripts/README.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("G1_AUDIT_MISSION=sprint100m", prepare_source)
+        self.assertIn("G1_VISION_SPRINT 1", prepare_source)
+        self.assertIn("command_output_enabled=false", prepare_source)
+        self.assertIn("rl_real_g1", prepare_source)
+        self.assertNotIn('"${RUNNING_BINARY}"', prepare_source)
+        self.assertNotIn("systemctl", prepare_source)
+        self.assertIn('STATUS_PORT="${G1_VISION_STATUS_PORT:-15002}"', dry_run_source)
+        self.assertIn("skill6_ramp_to_1_s", dry_run_source)
+        self.assertIn("Skill 6 当前只有仿真和 prepare-only", scripts_readme)
 
     def test_auto_start_waits_for_state1_ack_not_fixed_three_seconds(self) -> None:
         simulator_source = SIM_SCRIPT_PATH.read_text(encoding="utf-8")
@@ -164,7 +198,7 @@ class Skill6TransitionTests(unittest.TestCase):
         )[1].split("class RLFSMStateRLVisionWalk0p5m", 1)[0]
 
         self.assertLess(
-            skill6.index("rl.InitRL(robot_config_path)"),
+            skill6.index("rl.HasLoadedPolicy(robot_config_path)"),
             skill6.index("VisionSprintMode::SetEnabled(true)"),
         )
 

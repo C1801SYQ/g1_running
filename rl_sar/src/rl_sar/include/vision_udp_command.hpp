@@ -263,9 +263,10 @@ class VisionUdpCommandReceiver
 {
 public:
     // Num7 hard limits that environment variables must not override.
-    // The deployed robomimic locomotion policy was trained for walking
-    // commands up to 1.0 m/s. Keep Num7 inside that trained distribution.
-    static constexpr float kNum7MaxVx = 1.00f;
+    // Skill 7 uses the dedicated running policy and must never exceed the
+    // operator-selected 3.0 m/s ceiling, even if an environment variable is
+    // configured with a larger value.
+    static constexpr float kNum7MaxVx = 3.00f;
     static constexpr float kNum7MaxWz = 0.25f;
 
     VisionUdpCommandReceiver()

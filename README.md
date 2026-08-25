@@ -6,7 +6,7 @@
 
 ## 项目概述
 
-在 G1 21 自由度跑步策略基础上扩展为 **29 自由度**全身跑步，训练策略实现 0~5.1 m/s 变速跑步 + 转向，并通过 rl_sar 框架部署到 MuJoCo 仿真和实体机器人。
+在 G1 21 自由度跑步策略基础上扩展为 **29 自由度**全身跑步，训练策略实现 0~5.1 m/s 变速跑步 + 转向，并通过 rl_sar 框架部署到 MuJoCo 仿真和实体机器人。当前 GitHub 发布基线统一为 `main`。
 
 **已验收成果：** 稳定部署策略来自
 `2026-08-12_13-11-17_gait_v2_finish_175198/model_175197.pt`，支持
@@ -14,12 +14,38 @@
 实测完成 100 m 用时 **27.36 s**、平均速度 **3.65 m/s**，双线识别率
 0.965，最大横向偏移 0.758 m。
 
-当前工作分支已部署 smooth_175600 policy，并新增低中速跑步清理训练任务；回合
-并主线前仍需按 `docs/BRANCHES.md` 拆分提交和回归验证。
+当前工作区同时包含训练、部署和视觉改动：训练侧保留鲁棒性续训配置，部署侧包含
+Skill 6/7 状态机与视觉流程；当前 `policy.pt` 的发布元数据见
+`rl_sar/policy/g1/running/source.txt`。新策略在完成仿真、吊装和急停验证前，不应直接用于实体机器人。
 
-> checkpoint 编号只在各自运行目录内有意义。当前 `model_175197` 与历史上
-> 站姿异常的同编号模型不是同一文件；部署策略 SHA256 为
-> `5de41b2e247d44db8c1378cc32367227482ab911a640366bc1fc563fda153b57`。
+> 历史 checkpoint 编号只在各自运行目录内有意义。当前工作区部署策略来源、观测/动作维度
+> 和导出方式以 `source.txt`、`config.yaml`、`deploy.yaml` 为准；当前策略 SHA256 为
+> `c4890005e430895feeb1aa8a80fa71f5e7fe96f7c7b45652bb709807d24930b2`。
+
+## Skill 6 最新状态（2026-08-25）
+
+主线新增并整理了 Skill 6 视觉百米冲刺链路。Skill 6 的目标行为是：按键 `6`
+进入已经加载的 Skill 5 Running 策略后，持续执行约 110 m 的前进任务；白线识别
+只用于修正 `yaw`，没有白线、RGB-D 卡帧或视觉节点暂时没有新帧时，仍保持直线前进。
+策略接口保持 **96 维输入、29 维输出**，没有修改 `rl_sar` 的基础接口或按键 `0`。
+
+本轮实测和排查记录如下：
+
+- FSM 能够完成 `0 → 1 → 5 → 6`，Running 策略也能正常加载；
+- 早期 Skill 6 不前进的直接原因是 RGB-D 只收到启动阶段的帧，深度安全门持续输出
+  `0 0 0 hard_stop`，而不是按键或 Running 策略没有进入；
+- RealSense ROS2 日志出现过 `control_transfer ... Resource temporarily unavailable`，
+  因此“话题存在”不能等价于“画面持续刷新”；
+- ROS1 路径还遇到过 `rospkg` 缺失、NumPy 版本不兼容等问题，Skill 6 当前统一采用
+  ROS2 Foxy 和 Skill 7 兼容的相机预览链路；
+- 当前启动器在相机启动失败时默认仍进入控制器（`G1_SKILL6_REQUIRE_CAMERA=0`），
+  相机可用时显示预览；若需要把相机作为启动前置条件，可显式设置为 `1`；
+- 已完成本地 Python 静态检查和 41 项视觉/任务单元测试；受控真机启动验证能够进入
+  `rl_real_g1` 被动状态，验证过程未按键、未下发运动指令。
+
+完整的 Skill 6 部署说明、故障现象和测试流程见
+[`vision/README.md`](vision/README.md)。真实机器人测试必须吊装、急停可触及，并从低速
+开始逐步验证；当前 110 m 距离仍是命令速度积分估算，不是可靠里程计结果。
 
 ## 项目导航
 
@@ -33,22 +59,30 @@
 | [`vision/scripts/README.md`](vision/scripts/README.md) | 视觉脚本索引与安全级别 |
 | [`robot_rl/scripts/README.md`](robot_rl/scripts/README.md) | 训练、导出及工具脚本索引 |
 | [`docs/REPOSITORY_CLEANUP.md`](docs/REPOSITORY_CLEANUP.md) | 本地生成物、备份和外部克隆的清理建议 |
+| [`docs/JAKOTICS_AMP_MIGRATION.md`](docs/JAKOTICS_AMP_MIGRATION.md) | Jakotics AMP-Run 训练、sim2sim 与 rl_sar 适配路线 |
+| [`docs/AMP_RUNNING_BASELINE_MIGRATION.md`](docs/AMP_RUNNING_BASELINE_MIGRATION.md) | AMP_Running_baseline 训练、导出和对比路线 |
 
-## 当前状态（2026-08-17）
+## 当前状态（2026-08-25）
 
 | 项目 | 状态 |
 |------|------|
-| 主线稳定基线 | `main` 已合入 Skill 7 视觉更新；历史稳定部署为 gait_v2 `model_175197` |
-| 当前工作分支 | `repository-cleanup`，领先 `main` 4 个提交，包含 smooth_175600 policy、低速续训任务和仓库整理文档 |
-| 当前部署策略（工作区） | `rl_sar/policy/g1/running/policy.pt`，SHA256 `91c8a527760e91654f6224a2927d6319935cf199abadbf117b16e3b35bcb9adc` |
+| 主线稳定基线 | 历史稳定部署为 gait_v2 `model_175197`；当前唯一发布分支为 `main` |
+| 当前训练 | `robust_dynamics_stage1_20260821`，从 `robust_straight_yaw_20260821_resume/model_78250.pt` 续训，`8196` 并行环境，训练进程仍在运行 |
+| 最新训练 checkpoint | `clean_training/unitree_rl_lab/logs/rsl_rl/unitree_g1_29dof_sprint_balanced/2026-08-21_14-21-53_robust_dynamics_stage1_20260821/model_80500.pt` |
+| 当前部署策略（工作区） | `rl_sar/policy/g1/running/policy.pt`，来源 `model85800_straight`，SHA256 `c4890005e430895feeb1aa8a80fa71f5e7fe96f7c7b45652bb709807d24930b2` |
 | 速度范围 | `vx=0~5.1 m/s`、`vy=±0.75 m/s`、`wz=±1.5 rad/s` |
 | 已记录视觉实测 | gait_v2：100 m / 27.36 s / 3.65 m/s，`max_abs_y=0.758 m` |
-| 当前训练方向 | low/mid-speed cleanup：偏重 0.3~3.0 m/s 低中速跑步，保留少量 3.0~5.1 m/s 高速采样 |
+| 当前训练方向 | 鲁棒性第一阶段：在保持 0~5.1 m/s 和 yaw 转向的基础上，加入摩擦、恢复系数、质心、初始状态和外部扰动随机化；新策略尚未部署 |
+| 本地部署验证 | `rl_sar` 全部 CMake 目标编译成功；视觉全套测试 `157 passed`，Skill 6/7 定向测试 `36 passed`，线路测试 `35 passed` |
+| 干净部署补丁 | `vision/integrations/g1_running/g1_running_skill6.patch` 仍是旧入口版本；当前完整部署源码已直接内嵌在 `rl_sar/`，重生成补丁并通过 clean-clone 构建后再部署 |
+| 内嵌训练仓库 | `clean_training/unitree_rl_lab/` 已从 Gitlink 平铺为普通目录，包含当前训练源代码和鲁棒性配置；日志、缓存、checkpoint 和嵌套 `.git` 不上传 |
+| 内嵌部署仓库 | `rl_sar/` 已同步当前本地部署源码、running 策略、视觉 UDP 接口和 Skill 7 测试；编译目录、日志、备份策略和运行产物不上传 |
 | 机器人自启动 | 本体 user systemd `g1_vision_skill7.service` 已配置为开机启动 Skill 7，目标 `110 m / 260 s`，覆盖 100 m 赛程 |
-| 分支整理 | 详见 `docs/BRANCHES.md`；旧视觉审计分支已合入主线，可确认后归档/删除 |
+| 分支整理 | 详见 `docs/BRANCHES.md`；GitHub 只保留 `main`，实验分支统一删除远程引用 |
 
-当前工作分支仍有未提交改动；合并回 `main` 前建议把文档整理、policy 部署、
-训练配置和视觉脚本改动拆成独立提交，方便回滚和真机行为定位。
+本次主线同步包含根仓库的视觉、部署脚本、测试和文档，以及当前两套本地仓库的受控源文件。
+训练日志、模型 checkpoint、编译目录、备份策略、嵌套 Git 元数据和机器运行日志仍留在本地，
+不进入 GitHub。GitHub 只保留 `main`，便于后续发布、回滚和真机行为定位。
 
 ---
 
@@ -72,7 +106,7 @@
 │   │   └── robot_rl/tasks/manager_based/robot_rl/
 │   │       ├── g1/              # G1 环境配置
 │   │       │   ├── g1_running_clf_29dof_env_cfg.py  # 29dof 跑步训练配置
-│   │       │   └── agents/      # PPO 策略配置
+│   │       │   └── PPO 配置/    # PPO 策略配置
 │   │       └── mdp/             # MDP 组件 (rewards/commands/terminations/events)
 │   ├── transfer/sim/            # MuJoCo sim2sim 验证
 │   ├── transfer/obelisk/        # Obelisk 实体部署 (ROS2)
@@ -192,7 +226,7 @@
 | `rl_sdk.cpp` | **新增 `phase_sin_cos` 观测** — 计算 sin(2πφ)/cos(2πφ) 步态相位（原框架无此观测） |
 | `rl_sdk.hpp` | 新增 `base_position` 字段到 RobotState（用于真距离估算） |
 | `rl_sim_mujoco.cpp` | 从 `mjData->qpos` 读取 base 位置 |
-| `policy/g1/running/config.yaml` | 新建 29dof 跑步策略配置（98 维观测、29 维动作、KP/KD/action_scale/joint_mapping） |
+| `policy/g1/running/config.yaml` | 新建 29dof 跑步策略配置（96 维观测、29 维动作、KP/KD/action_scale/joint_mapping） |
 
 ---
 
@@ -214,8 +248,9 @@
 | 12 | `steady_upper_v2_turn` | 155,200 | 0.0-5.1 | **转向强化**（续训）：rel_heading_envs 40%、rel_closed_loop_yaw 45%、lat_vel↓、yaw_vel↑，增强 yaw 转向 | 4.95 m/s |
 | 13 | `steady_upper_v2_still` | 165,198 | 0.0-5.1 | **0 m/s 关节静止**（续训）：新增 low_speed_joint_stillness 奖励 | 最后一个历史稳定版 |
 | 14 | `stand_improve` | 175,197 | 0.0-5.1 | 站姿奖励错误覆盖到 0~0.9 m/s，导致张腿/怪异站姿 | 已弃用，禁止部署 |
-| 15 | `gait_v2_finish` | 175,197 | 0.0-5.1 | 修复 standing 掩码、速度段和命令斜坡后重训；当前部署 SHA256 `5de41b2e...3b57` | ★ 当前部署；视觉 100 m 27.36 s |
-| 16 | `gait_v3_transition_straight` | 目标约 195,197 | 0.0-5.1 | 从 gait_v2 续训：增加低速 hip-yaw、站立静止、动作平滑和 1 m/s 以上直线奖励 | 训练中，未部署 |
+| 15 | `gait_v2_finish` | 175,197 | 0.0-5.1 | 修复 standing 掩码、速度段和命令斜坡后重训；当前工作区部署 SHA256 `bf704a...6e65e` | ★ 当前部署；视觉 100 m 27.36 s |
+| 16 | `gait_v3_transition_straight` | 目标约 195,197 | 0.0-5.1 | 从 gait_v2 续训：增加低速 hip-yaw、站立静止、动作平滑和 1 m/s 以上直线奖励 | 历史续训记录，未部署 |
+| 17 | `robust_dynamics_stage1_20260821` | 当前约 80,500 | 0.0-5.1 | 从 `robust_straight_yaw_20260821_resume/model_78250.pt` 续训；加入第一阶段动力学/初始状态/外部扰动随机化，保留直线与 yaw 转向目标 | 训练中，未部署 |
 
 > `steady_upper_v2` 针对视觉循迹做了专项优化：骨盆姿态/高度奖励保持相机前视、上半身稳定惩罚抑制抖动、COM 偏移与摩擦随机化增强平地直线鲁棒性。standing 轨迹只用于早期实验，因姿态不对称已移除。
 >
@@ -250,18 +285,15 @@ pip install -e source/robot_rl/
 > omni `carb::tasking Mutex` 递归锁崩溃）。当前轨迹库不包含 standing
 > 文件；0 m/s 由独立 standing 命令环境、默认站姿和静止奖励训练。
 
-当前 gait_v3 续训由用户级 systemd 托管，关闭终端不会终止训练：
+当前鲁棒性续训由 `env_isaaclab` 中的训练进程运行；不要停止该进程。查看进程和最新
+checkpoint：
 
 ```bash
-# 查看服务状态
-systemctl --user status g1-running-gait-v3-195198.service
-
-# 查看实时日志
-tail -f /home/ubuntu/robot_rl/train_gait_v3_transition_straight.log
-
-# 查看最近一次迭代
-tr '\r' '\n' < /home/ubuntu/robot_rl/train_gait_v3_transition_straight.log \
-    | grep 'Learning iteration' | tail -1
+source /home/ubuntu/anaconda3/etc/profile.d/conda.sh
+conda activate env_isaaclab
+pgrep -af 'scripts/rsl_rl/train.py'
+find clean_training/unitree_rl_lab/logs/rsl_rl \
+    -name 'model_*.pt' -printf '%T@ %p\n' | sort -nr | head
 ```
 
 ### 导出策略
@@ -362,8 +394,9 @@ P / LB_X      → 被动模式（急停）
 
 | 文件 | 说明 |
 |------|------|
-| `rl_sar/policy/g1/running/policy.pt` | ★ 当前部署策略：gait_v2 `model_175197`，SHA256 `5de41b2e...3b57` |
-| `rl_sar/policy/g1/running/policy_parameters.yaml` | 当前部署参数（0~5.1 m/s、观测/动作/KP/KD/默认关节角） |
+| `rl_sar/policy/g1/running/policy.pt` | ★ 当前部署策略：`model85800_straight`，SHA256 `c4890005...d24930b2` |
+| `rl_sar/policy/g1/running/config.yaml` / `deploy.yaml` | 当前部署参数（96 维观测、29 维动作、速度范围和关节映射） |
+| `rl_sar/policy/g1/running/source.txt` | 当前策略来源、checkpoint 和导出元数据 |
 | `models/steady_upper_v2/policy.pt` | 历史归档策略（165198 iter），不是当前部署文件 |
 | `models/steady_upper_v2/policy_parameters.yaml` | 历史归档策略参数 |
 | `models/speed_turn/policy.pt` | 速度优先策略 (JIT TorchScript) |
@@ -401,13 +434,14 @@ P / LB_X      → 被动模式（急停）
 - MuJoCo 仿真验证完成
 
 Skill 6 复用原有 `running` policy，不替换 Skill 5。控制器必须按
-`0 → 1 → 6` 的顺序操作：先从 Passive 起立，再进入状态 1，最后启动
-视觉百米冲刺；按 `6` 不会从 Passive 或 GetUp 自动起立。
+`0 → 1 → 5 → 6` 的顺序操作：先从 Passive 起立，再进入状态 1，进入
+Skill 5 Running 以加载跑步策略，最后启动视觉百米冲刺；按 `6` 不会从
+Passive、GetUp 或状态 1 直接启动。
 MuJoCo 的启动安全支撑会等待 C++ 确认进入 Skill 6 和双线锁定，不再因
 固定倒计时结束而让仍在操作状态机的机器人倒地。
 
 MuJoCo viewer reset 后，视觉任务会检测仿真时间回退/位置跳变并完整重置
-Skill 6 mission；无需重启 Python 视觉进程即可再次执行 `0 → 1 → 6`。
+Skill 6 mission；无需重启 Python 视觉进程即可再次执行 `0 → 1 → 5 → 6`。
 
 当前 gait_v2 策略最近一次视觉回归结果：100 m 用时 27.36 s，平均
 3.65 m/s，双线识别率 0.965，最大横向偏移 0.758 m。偏移主要来自策略

@@ -39,6 +39,16 @@ from g1_race_vision.rendering import (
     attitude_align_rgbd,
     gravity_align_rgbd,
 )
+from g1_race_vision.sprint_ramp import (
+    SprintRampConfig,
+    clamp_command_vx,
+    sprint_speed_cap,
+)
+from g1_race_vision.running_vision_mission import (
+    RunningVisionMission,
+    RunningVisionMissionConfig,
+    RunningVisionRampConfig,
+)
 from g1_race_vision.udp_command import (
     UdpCommandSender,
     UdpSkill6StatusReceiver,
@@ -207,6 +217,24 @@ def parse_args() -> argparse.Namespace:
             "locking the starting lane."
         ),
     )
+    parser.add_argument(
+        "--skill6-ramp-to-1",
+        type=float,
+        default=0.60,
+        help="Skill 6 startup ramp duration from 0 to 1 m/s.",
+    )
+    parser.add_argument(
+        "--skill6-ramp-to-3",
+        type=float,
+        default=0.80,
+        help="Skill 6 startup ramp duration from 1 to 3 m/s.",
+    )
+    parser.add_argument(
+        "--skill6-ramp-to-max",
+        type=float,
+        default=1.00,
+        help="Skill 6 startup ramp duration from 3 m/s to --speed.",
+    )
     parser.add_argument("--show-debug", action="store_true")
     parser.add_argument(
         "--debug-snapshot",
@@ -243,12 +271,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--auto-start-mission",
-        choices=("sprint100m", "walk0p5m"),
+        choices=("sprint100m", "walk0p5m", "runningvision110m"),
         default="sprint100m",
         help=(
             "With --auto-start-policy, which FSM mission to enter after "
-            "GetUp. sprint100m sends Num1 then Num6 (Skill 6); walk0p5m "
-            "sends Num1 then Num7 (Skill 7). Simulation only."
+            "GetUp. sprint100m sends Num1 then Num6; walk0p5m sends Num1 "
+            "then Num7; runningvision110m sends Num1 then Num7 with the "
+            "running-backed visual mission. Simulation only."
         ),
     )
     parser.add_argument(
@@ -352,12 +381,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mission",
-        choices=("sprint100m", "walk0p5m"),
+        choices=("sprint100m", "walk0p5m", "runningvision110m"),
         default="sprint100m",
         help=(
-            "Vision mission. sprint100m is the Skill 6 100 m race; "
-            "walk0p5m is the Skill 7 slow 0.5 m walk (default: sprint100m)."
+            "Vision mission. sprint100m is the legacy sprint; walk0p5m is "
+            "the Skill 7 walk; runningvision110m is Num7 with running and "
+            "a 110 m gate."
         ),
+    )
+    parser.add_argument(
+        "--running-vision-target-m",
+        type=float,
+        default=110.0,
+        help="Running-backed Num7 command-distance target in metres.",
+    )
+    parser.add_argument(
+        "--running-vision-max-duration-s",
+        type=float,
+        default=260.0,
+        help="Running-backed Num7 mission timeout in seconds.",
     )
     parser.add_argument(
         "--num7-target-m",
@@ -386,6 +428,12 @@ def main() -> None:
     args.num7_max_duration_s = float(max(args.num7_max_duration_s, 0.1))
     args.num7_distance_scale = float(
         min(max(args.num7_distance_scale, 0.10), 2.0)
+    )
+    args.running_vision_target_m = float(
+        min(max(args.running_vision_target_m, 1.0), 200.0)
+    )
+    args.running_vision_max_duration_s = float(
+        min(max(args.running_vision_max_duration_s, 1.0), 1200.0)
     )
     if (
         args.finish_line_x > 0.0
@@ -480,6 +528,19 @@ def main() -> None:
             error_filter_alpha=args.error_filter_alpha,
         )
     )
+    sprint_ramp = SprintRampConfig(
+        ramp_to_1_s=args.skill6_ramp_to_1,
+        ramp_to_3_s=args.skill6_ramp_to_3,
+        ramp_to_max_s=args.skill6_ramp_to_max,
+    )
+    running_vision_mission = RunningVisionMission(
+        RunningVisionMissionConfig(
+            target_distance_m=args.running_vision_target_m,
+            cruise_speed_mps=min(max(args.speed, 0.2), 2.5),
+            max_duration_s=args.running_vision_max_duration_s,
+            ramp=RunningVisionRampConfig(),
+        )
+    )
     depth_safety = DepthSafetyGate(DepthSafetyConfig())
     num7_controller = LaneFollowerController(
         LaneFollowerConfig(
@@ -491,7 +552,11 @@ def main() -> None:
             max_yaw_accel_rps2=0.50,
             lateral_kp=1.20,
             heading_kp=0.20,
+            use_visual_heading_correction=True,
             imu_heading_kp=1.20,
+            correction_enter_lateral_error=0.12,
+            correction_exit_lateral_error=0.06,
+            predictive_enter_lateral_error=0.08,
             error_filter_alpha=0.32,
         )
     )
@@ -701,6 +766,7 @@ def main() -> None:
         next_debug = time.monotonic()
         vision_enabled = False
         skill6_ready_at: float | None = None
+        sprint_ramp_started_at: float | None = None
         saved_lock_debug = False
         saved_first_loss_debug = False
         last_depth_m = None
@@ -736,13 +802,14 @@ def main() -> None:
             reason: str,
             preserve_finished_hold: bool = False,
         ) -> None:
-            """Reset every latch owned by one Skill 6 race."""
+            """Reset every latch owned by one visual running mission."""
 
-            nonlocal vision_enabled, skill6_ready_at
+            nonlocal vision_enabled, skill6_ready_at, sprint_ramp_started_at
             nonlocal saved_lock_debug, saved_first_loss_debug
             nonlocal camera_reference_xmat
 
             vision_enabled = False
+            sprint_ramp_started_at = None
             skill6_ready_at = (
                 now + max(0.0, args.skill6_stabilize_seconds)
                 if enabled
@@ -773,8 +840,11 @@ def main() -> None:
                 )
             if enabled:
                 skill6_enabled.set()
+                if args.mission == "runningvision110m":
+                    running_vision_mission.enable(now)
             else:
                 skill6_enabled.clear()
+                running_vision_mission.disable()
             print(f"[vision] Skill 6 mission reset: {reason}", flush=True)
 
         def _num7_step(
@@ -1102,11 +1172,13 @@ def main() -> None:
                             race_timing["started_at"] = now
                             race_timing["start_x"] = float(data.qpos[0])
                             race_timing["heading_yaw"] = support_yaw
+                            sprint_ramp_started_at = now
                             sprint_started_now = True
                     if sprint_started_now:
                         print(
                             "[race] straight sprint started under IMU heading "
-                            "hold; vision remains correction-only",
+                            "hold; vision remains correction-only; "
+                            "speed cap ramps 0->1->3->max",
                             flush=True,
                         )
                     if not vision_enabled:
@@ -1216,6 +1288,29 @@ def main() -> None:
                             now=now,
                             heading_hold_error_rad=heading_hold_error,
                         )
+                    if not finish_line_crossed.is_set():
+                        ramp_elapsed = (
+                            now - sprint_ramp_started_at
+                            if sprint_ramp_started_at is not None
+                            else 0.0
+                        )
+                        if args.mission == "runningvision110m":
+                            command = running_vision_mission.update(
+                                now,
+                                command.wz,
+                                perception_valid=command.perception_valid,
+                                motion_allowed=True,
+                                safety_reason="SIM_DEPTH_CLEAR",
+                            )
+                        else:
+                            command = clamp_command_vx(
+                                command,
+                                sprint_speed_cap(
+                                    ramp_elapsed,
+                                    args.speed,
+                                    sprint_ramp,
+                                ),
+                            )
                     if start_x is not None:
                         with lock:
                             current_y = float(data.qpos[1])
@@ -1399,12 +1494,17 @@ def main() -> None:
             if not wait_for_state1():
                 return
 
-            if args.auto_start_mission == "walk0p5m":
+            if args.auto_start_mission in ("walk0p5m", "runningvision110m"):
                 # Let the locomotion policy stand stably before Num7.
                 if stop.wait(0.50):
                     return
-                # Num7 = LB + DPadLeft -> RLFSMStateRLVisionWalk0p5m.
-                print("[policy] sending LB+Left -> Num7 (walk0p5m)", flush=True)
+                # Num7 = LB + DPadLeft. The adapter selects either the
+                # validated locomotion walk or running-backed visual mission.
+                print(
+                    "[policy] sending LB+Left -> Num7 ("
+                    f"{args.auto_start_mission})",
+                    flush=True,
+                )
                 set_buttons(0b00000010, 0b10000000)
                 if stop.wait(0.15):
                     return

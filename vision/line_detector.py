@@ -76,6 +76,14 @@ class LaneDetectorConfig:
     boundary_warning_lateral_error: float = 0.40
     boundary_recovery_lateral_error: float = 0.30
     boundary_breach_confirm_frames: int = 30
+    # A lost identity may recover only by a continuous return of the original
+    # pair from the last known side. A suddenly centred neighbouring lane is
+    # never accepted as a new target during the same mission.
+    identity_reacquire_confirm_frames: int = 6
+    identity_reacquire_entry_min_error: float = 0.14
+    identity_reacquire_entry_max_error: float = 0.38
+    identity_reacquire_max_step_error: float = 0.12
+    identity_reacquire_min_confidence: float = 0.45
     correction_only_mode: bool = False
 
 
@@ -130,6 +138,8 @@ class WhiteLaneDetector:
         self._last_valid_lateral_error = 0.0
         self._boundary_breach_frames = 0
         self._lane_identity_lost = False
+        self._identity_reacquire_count = 0
+        self._identity_reacquire_previous_error: Optional[float] = None
         self._lateral_reference = 0.0
         self._num7_lifecycle_enabled = False
         self._num7_mission_active = False
@@ -151,6 +161,8 @@ class WhiteLaneDetector:
         self._last_valid_lateral_error = 0.0
         self._boundary_breach_frames = 0
         self._lane_identity_lost = False
+        self._identity_reacquire_count = 0
+        self._identity_reacquire_previous_error = None
         self._lateral_reference = 0.0
         self._lock_confirm_count = 0
         self._lock_confirm_history.clear()
@@ -186,9 +198,7 @@ class WhiteLaneDetector:
             self.reset()
             self._num7_mission_active = True
             self._mission_state = (
-                "LOCKED"
-                if self.config.correction_only_mode
-                else "INITIAL_LOCK"
+                "LOCKED" if self.config.correction_only_mode else "INITIAL_LOCK"
             )
             self._lock_confirm_count = 0
             self._lock_confirm_history.clear()
@@ -361,11 +371,23 @@ class WhiteLaneDetector:
                 return result
 
             if self._lane_identity_lost:
-                result.valid = False
-                result.source = "lane-identity-lost"
-                result.boundary_risk = True
-                result.mode = "IDENTITY_LOST"
-                return result
+                if not self._confirm_original_lane_reacquisition(result):
+                    result.valid = False
+                    result.source = "lane-identity-lost"
+                    result.boundary_risk = True
+                    result.mode = "IDENTITY_REACQUIRE"
+                    result.lock_confirm = self._identity_reacquire_count
+                    result.lock_confirm_target = (
+                        self.config.identity_reacquire_confirm_frames
+                    )
+                    return result
+                self._lane_identity_lost = False
+                self._boundary_breach_frames = 0
+                self._identity_reacquire_count = 0
+                self._identity_reacquire_previous_error = None
+                result.source = f"{pair_source}-reacquired"
+                result.boundary_risk = False
+                result.mode = self._mission_state
 
             if self._mission_state == "INITIAL_LOCK":
                 if observation_rows is None:
@@ -537,6 +559,8 @@ class WhiteLaneDetector:
             >= self.config.boundary_warning_lateral_error
         ):
             self._record_boundary_breach()
+        if self._lane_identity_lost:
+            self._reset_identity_reacquisition()
         result = DetectionResult(
             valid=False,
             source=(
@@ -572,6 +596,55 @@ class WhiteLaneDetector:
             >= self.config.boundary_breach_confirm_frames
         ):
             self._lane_identity_lost = True
+
+    def _confirm_original_lane_reacquisition(
+        self,
+        result: DetectionResult,
+    ) -> bool:
+        """Confirm a continuous return from the last-known original side."""
+
+        error = float(result.lateral_error)
+        confidence = float(result.confidence)
+        previous = self._identity_reacquire_previous_error
+        last = float(self._last_valid_lateral_error)
+        same_side = np.sign(error) == np.sign(last) or abs(error) <= 0.03
+
+        if previous is None:
+            plausible = (
+                np.isfinite(error)
+                and np.isfinite(confidence)
+                and confidence >= self.config.identity_reacquire_min_confidence
+                and same_side
+                and self.config.identity_reacquire_entry_min_error
+                <= abs(error)
+                <= self.config.identity_reacquire_entry_max_error
+                and abs(error) <= abs(last) + 1e-6
+            )
+        else:
+            plausible = (
+                np.isfinite(error)
+                and np.isfinite(confidence)
+                and confidence >= self.config.identity_reacquire_min_confidence
+                and (same_side or abs(error) <= 0.03)
+                and abs(error - previous)
+                <= self.config.identity_reacquire_max_step_error
+                and abs(error) <= abs(previous) + 0.03
+            )
+
+        if not plausible:
+            self._reset_identity_reacquisition()
+            return False
+
+        self._identity_reacquire_count += 1
+        self._identity_reacquire_previous_error = error
+        return (
+            self._identity_reacquire_count
+            >= self.config.identity_reacquire_confirm_frames
+        )
+
+    def _reset_identity_reacquisition(self) -> None:
+        self._identity_reacquire_count = 0
+        self._identity_reacquire_previous_error = None
 
     @staticmethod
     def _guarded_invalid_result(

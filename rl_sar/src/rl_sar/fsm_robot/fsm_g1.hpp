@@ -65,7 +65,7 @@ public:
 
     void Run() override
     {
-        Interpolate(percent_getup, rl.now_state.motor_state.q, rl.params.Get<std::vector<float>>("default_dof_pos"), 2.0f, "", true);
+        Interpolate(percent_getup, rl.now_state.motor_state.q, rl.params.Get<std::vector<float>>("default_dof_pos"), 2.0f, "Getting up", true);
     }
 
     void Exit() override {}
@@ -78,16 +78,7 @@ public:
         }
         if (percent_getup >= 1.0f)
         {
-            const char *auto_running = std::getenv("G1_AUTO_RUNNING");
-            if (auto_running != nullptr && std::string(auto_running) == "1")
-            {
-                return "RLFSMStateRLRunning";
-            }
-            if (rl.control.current_keyboard == Input::Keyboard::Num5 || rl.control.current_gamepad == Input::Gamepad::LB_DPadUp)
-            {
-                return "RLFSMStateRLRunning";
-            }
-            else if (rl.control.current_keyboard == Input::Keyboard::Num1 || rl.control.current_gamepad == Input::Gamepad::RB_DPadUp)
+            if (rl.control.current_keyboard == Input::Keyboard::Num1 || rl.control.current_gamepad == Input::Gamepad::RB_DPadUp)
             {
                 return "RLFSMStateRLRoboMimicLocomotion";
             }
@@ -120,7 +111,7 @@ public:
 
     void Exit() override {}
 
-    std::string CheckChange() override   // GetUp state
+    std::string CheckChange() override
     {
         if (rl.control.current_keyboard == Input::Keyboard::P || rl.control.current_gamepad == Input::Gamepad::LB_X || percent_getdown >= 1.0f)
         {
@@ -129,10 +120,6 @@ public:
         else if (rl.control.current_keyboard == Input::Keyboard::Num0 || rl.control.current_gamepad == Input::Gamepad::A)
         {
             return "RLFSMStateGetUp";
-        }
-        else if (rl.control.current_keyboard == Input::Keyboard::Num5 || rl.control.current_gamepad == Input::Gamepad::LB_DPadUp)
-        {
-            return "RLFSMStateRLRunning";
         }
         return state_name_;
     }
@@ -182,6 +169,17 @@ RLFSMStateRLRoboMimicLocomotion(RL *rl) : RLFSMState(*rl, "RLFSMStateRLRoboMimic
         // if (Interpolate(percent_transition, rl.now_state.motor_state.q, rl.params.Get<std::vector<float>>("default_dof_pos"), 0.5f, "Policy transition", true)) return;
 
         if (!rl.rl_init_done) rl.rl_init_done = true;
+
+        // Keep the state-1 handshake alive while the Python simulator is
+        // waiting on the controller. This mirrors the mission heartbeats and
+        // prevents a one-shot UDP packet from leaving the startup tether on.
+        static auto last_state1_notice = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_state1_notice >= std::chrono::milliseconds(500))
+        {
+            VisionSprintMode::NotifyState1();
+            last_state1_notice = now;
+        }
 
         std::cout << "\r\033[K" << std::flush << LOGGER::INFO << "RL Controller [" << rl.config_name << "] x:" << rl.control.x << " y:" << rl.control.y << " yaw:" << rl.control.yaw << std::flush;
         RLControl();

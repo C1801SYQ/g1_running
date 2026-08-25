@@ -1,0 +1,11 @@
+source_name=model85800_straight
+source_label=85800 直线性优先
+source_role=直线性优先
+source_checkpoint=model_source/selected_checkpoint.pt
+source_deploy=model_source/deploy.yaml
+source_exported=policy/g1/running/policy.pt
+checkpoint_iter=85800
+num_observations=96
+num_actions=29
+max_forward_speed=5.1
+conversion=offline_cpu_rsl_rl_actor_to_torchscript

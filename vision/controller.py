@@ -16,7 +16,11 @@ class LaneFollowerConfig:
     # toward the lane centre hard. The previous 0.65 gain + 0.10 rad heading
     # limit let a 0.4 m drift grow for ~16 m before the boundary stop kicked in.
     lateral_kp: float = 1.20
+    # Keep outward derivative authority modest so gait/camera noise cannot
+    # create steering spikes. Use stronger derivative damping only while
+    # returning inward, where it releases steering before centre-line overrun.
     lateral_kd: float = 0.08
+    lateral_inward_kd: float = 0.18
     heading_kp: float = 0.20
     use_visual_heading_correction: bool = False
     imu_heading_kp: float = 1.20
@@ -31,28 +35,26 @@ class LaneFollowerConfig:
     # correction mode only after leaving this corridor and stays quiet again
     # after returning to the smaller exit threshold (Schmitt hysteresis).
     #
-    # The enter threshold is deliberately wide (0.26 m): a small static offset
-    # (robot running straight but ~0.25 m off the lane centre) is NOT a drift,
-    # and penalizing it with the speed ramp cut the sprint from ~4.4 m/s to
-    # ~2.2 m/s for the whole race. Only genuine departures past 0.26 m should
-    # cost speed.
-    correction_enter_lateral_error: float = 0.26
-    correction_exit_lateral_error: float = 0.15
+    # Stability-first corridor. A steady 0.20--0.25 m offset is a real tracking
+    # error on the physical robot, not harmless gait sway. Enter correction
+    # early and keep it active until the robot is close to its locked path.
+    correction_enter_lateral_error: float = 0.18
+    correction_exit_lateral_error: float = 0.06
     # A real slow drift should not have to reach the wide static-offset gate.
     # Enter early only when an offset is already meaningful and keeps moving
     # outward in one direction for several frames. Gait sway reverses too often
     # to accumulate this confirmation time.
-    predictive_enter_lateral_error: float = 0.14
-    predictive_outward_rate_per_s: float = 0.055
-    predictive_confirm_s: float = 0.30
+    predictive_enter_lateral_error: float = 0.08
+    predictive_outward_rate_per_s: float = 0.04
+    predictive_confirm_s: float = 0.12
     # Strong correction authority: once a real departure is detected, pull back
     # toward the lane centre hard. The previous 0.10 rad heading limit and 0.65
     # lateral gain let a 0.4 m drift grow for ~16 m before the boundary stop
     # kicked in; with a stronger correction the robot recentres much sooner and
     # the speed ramp stays mostly inactive.
     max_lane_correction_heading_rad: float = 0.18
-    # Gentle speed ramp so a real (but bounded) correction slows the robot only
-    # mildly; full slow-down is reserved for large departures.
+    # Once correction is active, trade speed for a damped return. Keeping full
+    # sprint speed while already moving inward caused overshoot on hardware.
     lateral_slow_start: float = 0.16
     lateral_full_slow: float = 0.50
     lateral_rate_slow_start_per_s: float = 0.12
@@ -62,9 +64,10 @@ class LaneFollowerConfig:
     heading_slow_start_rad: float = 0.10
     heading_full_slow_rad: float = 0.35
     steering_slow_start_ratio: float = 0.65
-    # Keep the aggressive floor (0.22 of cruise) so genuine departures still
-    # collapse the sprint into a cautious slow-down; the wide enter threshold
-    # above already keeps small static offsets out of the correction ramp.
+    # Stability takes priority whenever the lane controller needs substantial
+    # yaw authority. Full cruise returns only after the exit corridor is met.
+    minimum_correction_speed_scale: float = 0.45
+    minimum_saturated_speed_scale: float = 0.30
     minimum_speed_scale: float = 0.22
     yaw_saturation_ratio: float = 0.92
     yaw_saturation_slow_after_s: float = 0.18
@@ -73,12 +76,29 @@ class LaneFollowerConfig:
     max_forward_decel_mps2: float = 3.00
     max_yaw_rate_rps: float = 0.35
     max_yaw_accel_rps2: float = 1.50
+    # A resumed/stalled camera callback must not spend the whole wall-clock gap
+    # in one control update and jump directly to a large steering command.
+    max_control_dt_s: float = 0.10
     # Retained for configuration compatibility. Visual availability no longer
     # gates forward motion: the running policy and IMU own the straight path,
     # while white lines only add bounded yaw correction when they are valid.
     hold_last_command_s: float = 0.35
     slow_after_lost_s: float = 0.90
     stop_after_lost_s: float = 1.50
+    # If the camera drops out while a real lateral recovery is active, going
+    # straight immediately preserves the *outward* body momentum and can put
+    # the robot into the neighbouring lane before the paint is visible again.
+    # Keep the last lane-safe target heading briefly, then blend it back to the
+    # immutable IMU heading. Ordinary centred dropouts do not use this path.
+    line_loss_recovery_trigger_m: float = 0.14
+    line_loss_recovery_min_heading_rad: float = 0.14
+    line_loss_recovery_hold_s: float = 1.20
+    line_loss_recovery_decay_s: float = 0.80
+    line_loss_recovery_speed_scale: float = 0.40
+    # A confirmed identity loss means the original path is not currently
+    # trustworthy. Continue moving so the gait stays settled, but never resume
+    # full sprint until the detector has safely reacquired the original pair.
+    identity_lost_speed_scale: float = 0.35
 
 
 @dataclass(frozen=True)
@@ -109,6 +129,7 @@ class LaneFollowerController:
         self._visual_heading_reference_rad = 0.0
         self._last_time: float | None = None
         self._last_valid_time: float | None = None
+        self._line_loss_recovery_heading_rad: float | None = None
 
     def reset(self) -> None:
         self._filtered_lateral = 0.0
@@ -124,6 +145,20 @@ class LaneFollowerController:
         self._visual_heading_reference_rad = 0.0
         self._last_time = None
         self._last_valid_time = None
+        self._line_loss_recovery_heading_rad = None
+
+    def reset_lane_guidance(self) -> None:
+        """Forget the old lane after a legal 100 m obstacle pass.
+
+        Forward-speed history is preserved so accepting the newly occupied
+        lane cannot create a second, artificial stop after the bypass.
+        """
+
+        previous_vx = self._previous_vx
+        last_time = self._last_time
+        self.reset()
+        self._previous_vx = previous_vx
+        self._last_time = last_time
 
     def set_visual_heading_reference(self, heading_error_rad: float) -> None:
         """Zero a fixed camera/mounting vanishing-point bias at lane lock."""
@@ -139,33 +174,39 @@ class LaneFollowerController:
     ) -> ControllerCommand:
         now = time.monotonic() if now is None else float(now)
         dt = self._time_step(now)
+        body_heading_error = self._finite_heading_error(
+            heading_hold_error_rad
+        )
 
-        if result.valid:
+        if self._perception_is_usable(result):
             wz = self._visual_steering(
-                result, dt, heading_hold_error_rad
+                result, dt, body_heading_error
             )
             self._last_valid_time = now
+            self._line_loss_recovery_heading_rad = None
 
-            confidence_scale = 0.72 + 0.28 * float(
-                np.clip(result.confidence, 0.0, 1.0)
-            )
             correcting = self._correction_direction != 0.0
+            direction = self._correction_direction
+            outward_rate = max(
+                0.0,
+                direction * self._filtered_lateral_rate,
+            )
             lateral_scale = (
                 self._safety_scale(
                     abs(self._filtered_lateral),
                     self.config.lateral_slow_start,
                     self.config.lateral_full_slow,
-                    self.config.minimum_speed_scale,
+                    self.config.minimum_correction_speed_scale,
                 )
                 if correcting
                 else 1.0
             )
             lateral_rate_scale = (
                 self._safety_scale(
-                    abs(self._filtered_lateral_rate),
+                    outward_rate,
                     self.config.lateral_rate_slow_start_per_s,
                     self.config.lateral_rate_full_slow_per_s,
-                    self.config.minimum_speed_scale,
+                    self.config.minimum_correction_speed_scale,
                 )
                 if correcting
                 else 1.0
@@ -173,8 +214,20 @@ class LaneFollowerController:
             # Visual heading is diagnostic only during the straight corridor;
             # body yaw is held by the IMU reference captured at mission start.
             heading_scale = 1.0
+            # During lane recovery a non-zero body heading is intentional. A
+            # body angle between straight ahead and the requested recovery
+            # angle is healthy progress, not an uncommanded heading error.
+            desired_lane_heading = self._desired_lane_heading()
+            unsafe_heading_error = (
+                self._unsafe_heading_error(
+                    body_heading_error,
+                    desired_lane_heading,
+                )
+                if correcting
+                else body_heading_error
+            )
             imu_heading_scale = self._safety_scale(
-                abs(heading_hold_error_rad or 0.0),
+                abs(unsafe_heading_error),
                 self.config.imu_heading_slow_start_rad,
                 self.config.imu_heading_full_slow_rad,
                 self.config.minimum_speed_scale,
@@ -184,13 +237,13 @@ class LaneFollowerController:
                 steering_ratio,
                 self.config.steering_slow_start_ratio,
                 1.0,
-                max(self.config.minimum_speed_scale, 0.42),
+                self.config.minimum_correction_speed_scale,
             )
             saturation_scale = self._safety_scale(
                 self._yaw_saturation_duration_s,
                 self.config.yaw_saturation_slow_after_s,
                 self.config.yaw_saturation_full_slow_s,
-                self.config.minimum_speed_scale,
+                self.config.minimum_saturated_speed_scale,
             )
             boundary_scale = (
                 self.config.minimum_speed_scale
@@ -198,7 +251,6 @@ class LaneFollowerController:
                 else 1.0
             )
             safety_scale = min(
-                confidence_scale,
                 lateral_scale,
                 lateral_rate_scale,
                 heading_scale,
@@ -224,14 +276,53 @@ class LaneFollowerController:
         # and ramp toward the policy's normal straight-line speed. Independent
         # depth, command-freshness, distance, timeout and E-stop gates remain
         # responsible for stopping the robot.
-        wz = self._rate_limit(
-            self._heading_hold_target(heading_hold_error_rad), dt
+        lost_for_s = (
+            0.0
+            if self._last_valid_time is None
+            else max(0.0, now - self._last_valid_time)
         )
-        vx = self._rate_limit_vx(self.config.cruise_speed_mps, dt)
+        recovery_heading = self._line_loss_recovery_heading(lost_for_s)
+        if recovery_heading is not None:
+            wz = self._rate_limit(
+                self._heading_target(
+                    body_heading_error,
+                    recovery_heading,
+                ),
+                dt,
+            )
+            target_vx = max(
+                self.config.minimum_tracking_speed_mps,
+                self.config.cruise_speed_mps
+                * self.config.line_loss_recovery_speed_scale,
+            )
+            vx = self._rate_limit_vx(target_vx, dt)
+            return ControllerCommand(
+                vx,
+                0.0,
+                wz,
+                "LINE_LOST_RECOVERY",
+                False,
+            )
+
+        wz = self._rate_limit(
+            self._heading_hold_target(body_heading_error), dt
+        )
+        target_vx = self.config.cruise_speed_mps
+        if result.source == "lane-identity-lost":
+            target_vx = max(
+                self.config.minimum_tracking_speed_mps,
+                self.config.cruise_speed_mps
+                * self.config.identity_lost_speed_scale,
+            )
+        vx = self._rate_limit_vx(target_vx, dt)
         state = (
             "STRAIGHT_IMU_NO_LINE"
             if self._last_valid_time is None
-            else "STRAIGHT_IMU_LINE_LOST"
+            else (
+                "STRAIGHT_IMU_IDENTITY_LOST"
+                if result.source == "lane-identity-lost"
+                else "STRAIGHT_IMU_LINE_LOST"
+            )
         )
         return ControllerCommand(vx, 0.0, wz, state, False)
 
@@ -267,15 +358,20 @@ class LaneFollowerController:
         now = time.monotonic() if now is None else float(now)
         dt = self._time_step(now)
         vx = self._rate_limit_vx(0.0, dt)
-        perception_valid = result is not None and result.valid
+        perception_valid = (
+            result is not None and self._perception_is_usable(result)
+        )
+        body_heading_error = self._finite_heading_error(
+            heading_hold_error_rad
+        )
         if perception_valid:
             wz = self._visual_steering(
-                result, dt, heading_hold_error_rad
+                result, dt, body_heading_error
             )
             self._last_valid_time = now
         else:
             wz = self._rate_limit(
-                self._heading_hold_target(heading_hold_error_rad), dt
+                self._heading_hold_target(body_heading_error), dt
             )
         state = "POST_FINISH_STOP" if vx <= 1e-3 else "POST_FINISH_DECEL"
         return ControllerCommand(vx, 0.0, wz, state, perception_valid)
@@ -362,21 +458,31 @@ class LaneFollowerController:
         # exit corridor. This prevents left/right command chatter when gait
         # sway makes the measured centre cross zero on consecutive frames.
         signed_error = self._correction_direction * self._filtered_lateral
-        lateral = self._correction_direction * max(
+        lateral = max(
             0.0,
             signed_error - self.config.correction_exit_lateral_error,
         )
-        lateral_rate = self._correction_direction * max(
-            0.0,
-            self._correction_direction * self._filtered_lateral_rate,
+        # Keep the rate signed in the correction frame: outward motion adds
+        # authority, while inward motion subtracts it and releases steering
+        # before the robot crosses the centre corridor.
+        lateral_rate = (
+            self._correction_direction * self._filtered_lateral_rate
         )
-        lane_guidance = (
+        rate_gain = (
+            self.config.lateral_kd
+            if lateral_rate >= 0.0
+            else self.config.lateral_inward_kd
+        )
+        lane_guidance = max(
+            0.0,
             self.config.lateral_kp * lateral
-            + self.config.lateral_kd * lateral_rate
+            + rate_gain * lateral_rate,
         )
         return float(
             np.clip(
-                -lane_guidance / max(self.config.imu_heading_kp, 1e-6),
+                -self._correction_direction
+                * lane_guidance
+                / max(self.config.imu_heading_kp, 1e-6),
                 -self.config.max_lane_correction_heading_rad,
                 self.config.max_lane_correction_heading_rad,
             )
@@ -496,6 +602,44 @@ class LaneFollowerController:
         )
 
     @staticmethod
+    def _perception_is_usable(result: DetectionResult) -> bool:
+        """Reject malformed valid frames before they contaminate filters."""
+
+        return bool(
+            result.valid
+            and np.isfinite(result.lateral_error)
+            and np.isfinite(result.heading_error_rad)
+            and np.isfinite(result.confidence)
+        )
+
+    @staticmethod
+    def _finite_heading_error(heading_error_rad: float | None) -> float:
+        if heading_error_rad is None:
+            return 0.0
+        value = float(heading_error_rad)
+        return value if np.isfinite(value) else 0.0
+
+    @staticmethod
+    def _unsafe_heading_error(
+        body_heading_error: float,
+        desired_lane_heading: float,
+    ) -> float:
+        """Return only heading outside the intentional recovery envelope."""
+
+        desired_direction = float(np.sign(desired_lane_heading))
+        if desired_direction == 0.0:
+            return float(body_heading_error)
+        directed_body_heading = desired_direction * body_heading_error
+        if 0.0 <= directed_body_heading <= abs(desired_lane_heading):
+            return 0.0
+        if directed_body_heading < 0.0:
+            return float(body_heading_error)
+        return float(
+            desired_direction
+            * (directed_body_heading - abs(desired_lane_heading))
+        )
+
+    @staticmethod
     def _safety_scale(
         value: float,
         slow_start: float,
@@ -518,26 +662,77 @@ class LaneFollowerController:
         return float(1.0 - progress * (1.0 - minimum_scale))
 
     def _time_step(self, now: float) -> float:
-        dt = (
+        elapsed = (
             1.0 / 30.0
             if self._last_time is None
             else max(now - self._last_time, 1e-3)
         )
         self._last_time = now
-        return dt
+        return min(elapsed, max(self.config.max_control_dt_s, 1e-3))
 
     def _heading_hold_target(
         self, heading_error_rad: float | None
     ) -> float:
-        if heading_error_rad is None:
-            return 0.0
+        heading_error = self._finite_heading_error(heading_error_rad)
+        return self._heading_target(heading_error, 0.0)
+
+    def _heading_target(
+        self,
+        body_heading_error_rad: float,
+        desired_heading_rad: float,
+    ) -> float:
         return float(
             np.clip(
-                -self.config.imu_heading_kp * heading_error_rad,
+                -self.config.imu_heading_kp
+                * (body_heading_error_rad - desired_heading_rad),
                 -self.config.max_yaw_rate_rps,
                 self.config.max_yaw_rate_rps,
             )
         )
+
+    def _line_loss_recovery_heading(
+        self,
+        lost_for_s: float,
+    ) -> float | None:
+        """Preserve a bounded, last-known-safe correction through dropout."""
+
+        if self._last_valid_time is None:
+            return None
+
+        if self._line_loss_recovery_heading_rad is None:
+            direction = self._correction_direction
+            if (
+                direction == 0.0
+                and abs(self._filtered_lateral)
+                >= self.config.line_loss_recovery_trigger_m
+            ):
+                direction = float(np.sign(self._filtered_lateral))
+            if direction == 0.0:
+                return None
+
+            desired = self._desired_lane_heading()
+            minimum = self.config.line_loss_recovery_min_heading_rad
+            if abs(desired) < minimum:
+                desired = -direction * minimum
+            self._line_loss_recovery_heading_rad = float(
+                np.clip(
+                    desired,
+                    -self.config.max_lane_correction_heading_rad,
+                    self.config.max_lane_correction_heading_rad,
+                )
+            )
+
+        hold_s = max(0.0, self.config.line_loss_recovery_hold_s)
+        decay_s = max(0.0, self.config.line_loss_recovery_decay_s)
+        if lost_for_s <= hold_s:
+            scale = 1.0
+        elif decay_s > 0.0 and lost_for_s < hold_s + decay_s:
+            scale = 1.0 - (lost_for_s - hold_s) / decay_s
+        else:
+            self._line_loss_recovery_heading_rad = None
+            return None
+
+        return float(self._line_loss_recovery_heading_rad * scale)
 
     def _rate_limit(self, target_wz: float, dt: float) -> float:
         max_delta = self.config.max_yaw_accel_rps2 * dt

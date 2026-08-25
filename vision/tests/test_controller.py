@@ -434,7 +434,7 @@ class LaneFollowerControllerTest(unittest.TestCase):
         self.assertGreater(fast.vx, 4.5)
         self.assertLess(moving.vx, 3.0)
 
-    def test_large_lateral_error_forces_smooth_strong_slowdown(self):
+    def test_large_lateral_error_keeps_running_speed_while_slowing_smoothly(self):
         controller = LaneFollowerController(
             LaneFollowerConfig(
                 cruise_speed_mps=5.1,
@@ -456,7 +456,20 @@ class LaneFollowerControllerTest(unittest.TestCase):
             speeds.append(command.vx)
 
         self.assertGreater(fast.vx, 4.5)
-        self.assertLess(speeds[-1], 1.5)
+        self.assertGreaterEqual(
+            speeds[-1],
+            controller.config.cruise_speed_mps
+            * controller.config.minimum_saturated_speed_scale,
+        )
+        self.assertLess(speeds[-1], 3.0)
+        self.assertLess(speeds[-1], fast.vx)
+        per_step_limit = controller.config.max_forward_decel_mps2 * 0.05
+        self.assertTrue(
+            all(
+                before - after <= per_step_limit + 1e-9
+                for before, after in zip([fast.vx] + speeds, speeds)
+            )
+        )
         per_step_limit = controller.config.max_forward_decel_mps2 * 0.05
         self.assertTrue(
             all(
@@ -499,7 +512,12 @@ class LaneFollowerControllerTest(unittest.TestCase):
                 for command in commands
             )
         )
-        self.assertLess(commands[-1].vx, 1.5)
+        self.assertGreaterEqual(
+            commands[-1].vx,
+            controller.config.cruise_speed_mps
+            * controller.config.minimum_saturated_speed_scale,
+        )
+        self.assertLess(commands[-1].vx, 2.0)
 
     def test_boundary_warning_decelerates_but_keeps_correcting(self):
         controller = LaneFollowerController(

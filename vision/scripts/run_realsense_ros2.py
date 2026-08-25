@@ -29,6 +29,16 @@ from g1_race_vision.depth_safety import (
 )
 from g1_race_vision.line_detector import LaneDetectorConfig, WhiteLaneDetector
 from g1_race_vision.mission_lifecycle import apply_num7_mode_transition
+from g1_race_vision.running_vision_mission import (
+    RunningVisionMission,
+    RunningVisionMissionConfig,
+    RunningVisionRampConfig,
+)
+from g1_race_vision.sprint_ramp import (
+    SprintRampConfig,
+    clamp_command_vx,
+    sprint_speed_cap,
+)
 from g1_race_vision.udp_command import (
     UdpVisionStatusReceiver,
     VisionMode,
@@ -39,6 +49,8 @@ try:
     from cv_bridge import CvBridge
     from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
     from geometry_msgs.msg import Twist
+    from rclpy.callback_groups import ReentrantCallbackGroup
+    from rclpy.executors import MultiThreadedExecutor
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
     from sensor_msgs.msg import CameraInfo, Image
@@ -65,6 +77,11 @@ class RealSenseLaneFollower(Node):
         )
         self.declare_parameter("cruise_speed_mps", 0.20)
         self.declare_parameter("mission", "sprint100m")
+        self.declare_parameter("running_vision_target_m", 110.0)
+        self.declare_parameter("running_vision_max_duration_s", 260.0)
+        self.declare_parameter("skill6_ramp_to_1_s", 0.60)
+        self.declare_parameter("skill6_ramp_to_3_s", 0.80)
+        self.declare_parameter("skill6_ramp_to_max_s", 1.00)
         self.declare_parameter("num7_target_m", 1.00)
         self.declare_parameter("num7_max_duration_s", 7.0)
         self.declare_parameter("num7_distance_scale", 0.60)
@@ -85,6 +102,14 @@ class RealSenseLaneFollower(Node):
         self.declare_parameter("depth_obstacle_percentile", 10.0)
         self.declare_parameter("depth_stop_distance_m", 0.80)
         self.declare_parameter("depth_slow_distance_m", 1.50)
+        # Competition running mode has no obstacle course.  This flag only
+        # bypasses the distance-based obstacle stop/slow decision for the
+        # running-vision mission; sensor/communication fail-safe paths remain
+        # active.
+        self.declare_parameter("competition_no_obstacle_stop", False)
+        # Competition running is IMU-primary: RGB/depth may add bounded yaw
+        # correction, but camera health must never gate forward vx.
+        self.declare_parameter("competition_imu_forward_only", False)
         self.declare_parameter("white_value_min", 175)
         self.declare_parameter("adaptive_value_floor", 55)
         self.declare_parameter("white_saturation_max", 100)
@@ -107,7 +132,29 @@ class RealSenseLaneFollower(Node):
             self.get_parameter("debug_candidates").value
         )
         speed = float(self.get_parameter("cruise_speed_mps").value)
+        self.sprint_speed_mps = speed
+        self.sprint_ramp = SprintRampConfig(
+            ramp_to_1_s=float(
+                self.get_parameter("skill6_ramp_to_1_s").value
+            ),
+            ramp_to_3_s=float(
+                self.get_parameter("skill6_ramp_to_3_s").value
+            ),
+            ramp_to_max_s=float(
+                self.get_parameter("skill6_ramp_to_max_s").value
+            ),
+        )
         self.mission = str(self.get_parameter("mission").value)
+        if self.mission not in ("sprint100m", "walk0p5m", "runningvision110m"):
+            raise ValueError(
+                "mission must be sprint100m, walk0p5m, or runningvision110m"
+            )
+        running_vision_target_m = float(
+            self.get_parameter("running_vision_target_m").value
+        )
+        running_vision_max_duration_s = float(
+            self.get_parameter("running_vision_max_duration_s").value
+        )
         self.num7_target_m = float(
             self.get_parameter("num7_target_m").value
         )
@@ -143,6 +190,12 @@ class RealSenseLaneFollower(Node):
         audit_udp_port = int(self.get_parameter("audit_udp_port").value)
         max_depth_age_s = float(
             self.get_parameter("max_depth_age_s").value
+        )
+        self.competition_no_obstacle_stop = bool(
+            self.get_parameter("competition_no_obstacle_stop").value
+        )
+        self.competition_imu_forward_only = bool(
+            self.get_parameter("competition_imu_forward_only").value
         )
 
         detector_config = LaneDetectorConfig(
@@ -195,7 +248,7 @@ class RealSenseLaneFollower(Node):
             # range. The gate remains a secondary independent clamp.
             self.controller = LaneFollowerController(
                 LaneFollowerConfig(
-                    cruise_speed_mps=1.00,
+                    cruise_speed_mps=0.50,
                     minimum_tracking_speed_mps=0.50,
                     max_yaw_rate_rps=0.25,
                     max_forward_accel_mps2=0.20,
@@ -266,15 +319,38 @@ class RealSenseLaneFollower(Node):
         self.camera_intrinsics: CameraIntrinsics | None = None
         self._last_detector_mode = "PREVIEW"
         self._num7_references_calibrated = False
+        self._sprint_enabled = False
+        self._sprint_started_at: float | None = None
+        self._running_command_lock = threading.Lock()
+        self._output_lock = threading.Lock()
+        self._latest_running_command = ControllerCommand(
+            0.0, 0.0, 0.0, "WAIT_FOR_RUNNING_VISION", False, False
+        )
+        self._last_color_time = 0.0
+        self._running_vision_mission = RunningVisionMission(
+            RunningVisionMissionConfig(
+                target_distance_m=min(max(running_vision_target_m, 1.0), 200.0),
+                cruise_speed_mps=min(max(speed, 0.2), 2.5),
+                max_duration_s=min(
+                    max(running_vision_max_duration_s, 1.0), 1200.0
+                ),
+                ramp=RunningVisionRampConfig(),
+            )
+        )
         self.latest_safety = self.depth_safety.evaluate(None, float("inf"))
         # The UDP listener runs on a background thread, while the detector,
         # controller and distance gate are owned by the ROS image callback.
         # Queue mode edges instead of mutating those state machines from both
         # threads. This also preserves a fast WALK -> NONE -> WALK sequence.
         self._mode_events: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self._depth_callback_group = ReentrantCallbackGroup()
 
         self.create_subscription(
-            Image, depth_topic, self.on_depth, qos_profile_sensor_data
+            Image,
+            depth_topic,
+            self.on_depth,
+            qos_profile_sensor_data,
+            callback_group=self._depth_callback_group,
         )
         self.create_subscription(
             Image, color_topic, self.on_color, qos_profile_sensor_data
@@ -322,6 +398,15 @@ class RealSenseLaneFollower(Node):
             target=self._status_loop, name="fsm-status", daemon=True
         )
         self._status_thread.start()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
+        if self.mission == "runningvision110m":
+            self._heartbeat_thread = threading.Thread(
+                target=self._running_vision_heartbeat_loop,
+                name="running-vision-heartbeat",
+                daemon=True,
+            )
+            self._heartbeat_thread.start()
         self.get_logger().info(
             f"FSM status listener on {status_host}:{status_port}"
         )
@@ -342,6 +427,55 @@ class RealSenseLaneFollower(Node):
                 f"{audit_udp_host}:{audit_udp_port}; this is separate from "
                 "robot command output"
             )
+        if self.mission == "runningvision110m" and self.competition_no_obstacle_stop:
+            self.get_logger().warning(
+                "COMPETITION MODE: obstacle distance stop/slow is disabled; "
+                "communication watchdog, E-stop and mission gates "
+                "remain active"
+            )
+        if self.mission == "runningvision110m" and self.competition_imu_forward_only:
+            self.get_logger().warning(
+                "IMU-PRIMARY MODE: RGB/depth are correction diagnostics only; "
+                "camera health will not gate forward vx"
+            )
+
+    def _evaluate_running_vision_safety(
+        self,
+        depth_m: np.ndarray | None,
+        depth_age_s: float,
+    ) -> DepthSafetyResult:
+        """Evaluate safety, with only course-obstacle handling bypassed.
+
+        The competition course is obstacle-free and running is IMU-primary.
+        In that explicit mode, depth is diagnostic only: missing, stale,
+        malformed or obstacle-like depth cannot gate forward vx. The
+        independent C++ communication watchdog and operator emergency-stop
+        paths remain authoritative.
+        """
+
+        result = self.depth_safety.evaluate(depth_m, depth_age_s)
+        if self.competition_imu_forward_only:
+            return DepthSafetyResult(
+                motion_allowed=True,
+                speed_scale=1.0,
+                obstacle_distance_m=result.obstacle_distance_m,
+                valid_fraction=result.valid_fraction,
+                depth_age_s=result.depth_age_s,
+                reason=f"DEPTH_DIAGNOSTIC_ONLY|{result.reason}",
+            )
+        if (
+            self.competition_no_obstacle_stop
+            and result.reason in ("OBSTACLE_STOP", "OBSTACLE_SLOW")
+        ):
+            return DepthSafetyResult(
+                motion_allowed=True,
+                speed_scale=1.0,
+                obstacle_distance_m=result.obstacle_distance_m,
+                valid_fraction=result.valid_fraction,
+                depth_age_s=result.depth_age_s,
+                reason="OBSTACLE_IGNORED",
+            )
+        return result
 
     def _status_loop(self) -> None:
         """Poll the FSM status port and queue lifecycle edges for ROS."""
@@ -353,8 +487,15 @@ class RealSenseLaneFollower(Node):
                     f"status receiver failed: {error}"
                 )
                 break
-            if self.mission == "walk0p5m":
-                for current_mode in transitions:
+            for current_mode in transitions:
+                if self.mission == "walk0p5m" or (
+                    self.mission in ("sprint100m", "runningvision110m")
+                    and current_mode in (
+                        VisionMode.SPRINT100M,
+                        VisionMode.WALK0P5M,
+                        VisionMode.NONE,
+                    )
+                ):
                     self._mode_events.put(current_mode)
             # Wake up ~10 Hz to keep up with the C++ heartbeat.
             self._status_stop.wait(0.10)
@@ -388,6 +529,40 @@ class RealSenseLaneFollower(Node):
             elif transition == "disabled":
                 self.get_logger().warning(
                     "Num7 FSM disable received; gate inactive"
+                )
+
+    def _apply_pending_sprint_transitions(self, now: float) -> None:
+        while True:
+            try:
+                current_mode = self._mode_events.get_nowait()
+            except queue.Empty:
+                return
+
+            running_vision_walk_edge = (
+                self.mission == "runningvision110m"
+                and current_mode == VisionMode.WALK0P5M
+            )
+            if current_mode == VisionMode.SPRINT100M or running_vision_walk_edge:
+                self._sprint_enabled = True
+                self._sprint_started_at = now
+                self.controller.reset()
+                if self.mission == "runningvision110m":
+                    self._running_vision_mission.enable(now)
+                    self.get_logger().warning(
+                        "Running-vision Num7 enable received; 110 m gate "
+                        "and speed ramp start now"
+                    )
+                else:
+                    self.get_logger().warning(
+                        "Sprint FSM enable received; speed ramp starts now"
+                    )
+            elif current_mode == VisionMode.NONE and self._sprint_enabled:
+                self._sprint_enabled = False
+                self._sprint_started_at = None
+                self.controller.reset()
+                self._running_vision_mission.disable()
+                self.get_logger().warning(
+                    "Visual sprint disable received; robot command gated to zero"
                 )
 
     def on_camera_info(self, message: CameraInfo) -> None:
@@ -445,6 +620,8 @@ class RealSenseLaneFollower(Node):
         now = time.monotonic()
         if self.mission == "walk0p5m":
             self._apply_pending_num7_transitions(now)
+        elif self.mission in ("sprint100m", "runningvision110m"):
+            self._apply_pending_sprint_transitions(now)
 
         rgb = self.bridge.imgmsg_to_cv2(message, desired_encoding="rgb8")
         max_age = float(self.get_parameter("max_depth_age_s").value)
@@ -490,6 +667,33 @@ class RealSenseLaneFollower(Node):
                 safe_command = ControllerCommand(
                     0.0, 0.0, 0.0, self.latest_safety.reason, False, True
                 )
+        elif self.mission == "runningvision110m":
+            desired_command = self.controller.update(result)
+            self.latest_safety = self._evaluate_running_vision_safety(
+                self.latest_depth_m, depth_age
+            )
+            mission_command = self._running_vision_mission.update(
+                now,
+                desired_command.wz,
+                perception_valid=result.valid,
+                motion_allowed=self.latest_safety.motion_allowed,
+                safety_reason=self.latest_safety.reason,
+            )
+            safe_command = self.depth_safety.apply(
+                mission_command, self.latest_safety
+            )
+            if not self._sprint_enabled:
+                safe_command = ControllerCommand(
+                    0.0,
+                    0.0,
+                    0.0,
+                    "WAIT_FOR_RUNNING_VISION",
+                    result.valid,
+                    False,
+                )
+            with self._running_command_lock:
+                self._latest_running_command = safe_command
+                self._last_color_time = now
         else:
             desired_command = self.controller.update(result)
             self.latest_safety = self.depth_safety.evaluate(
@@ -498,8 +702,28 @@ class RealSenseLaneFollower(Node):
             safe_command = self.depth_safety.apply(
                 desired_command, self.latest_safety
             )
-        self.audit_output.emit(safe_command)
-        actual_command = self.command_output.emit(safe_command)
+            if not self._sprint_enabled:
+                if self.command_output.enabled:
+                    safe_command = ControllerCommand(
+                        0.0, 0.0, 0.0, "WAIT_FOR_SKILL6", result.valid, False
+                    )
+            else:
+                ramp_elapsed = (
+                    now - self._sprint_started_at
+                    if self._sprint_started_at is not None
+                    else 0.0
+                )
+                safe_command = clamp_command_vx(
+                    safe_command,
+                    sprint_speed_cap(
+                        ramp_elapsed,
+                        self.sprint_speed_mps,
+                        self.sprint_ramp,
+                    ),
+                )
+        with self._output_lock:
+            self.audit_output.emit(safe_command)
+            actual_command = self.command_output.emit(safe_command)
 
         self.desired_cmd_publisher.publish(self._to_twist(desired_command))
         self.safe_cmd_publisher.publish(self._to_twist(safe_command))
@@ -528,11 +752,69 @@ class RealSenseLaneFollower(Node):
         debug_message.header = message.header
         self.debug_publisher.publish(debug_message)
 
+    def _running_vision_heartbeat_loop(self) -> None:
+        """Keep the C++ watchdog fed independently of RGB processing.
+
+        USB2 D435i delivers RGB at about 6 Hz, while a 640x480 detection and
+        debug publish can occasionally occupy the ROS callback for more than
+        the C++ 300 ms watchdog window. The heartbeat never invents a first
+        command. In IMU-primary competition mode it repeats forward vx and
+        removes stale visual yaw; camera/depth status remains diagnostic.
+        """
+
+        while not self._heartbeat_stop.wait(0.05):
+            if not self._sprint_enabled:
+                continue
+
+            with self._running_command_lock:
+                command = self._latest_running_command
+                last_color_time = self._last_color_time
+
+            # Do not turn the pre-first-frame zero into a received command;
+            # the existing C++ start watchdog must remain authoritative.
+            if command.state == "WAIT_FOR_RUNNING_VISION":
+                continue
+
+            now = time.monotonic()
+            depth_age = now - self.latest_depth_time
+            safety = self._evaluate_running_vision_safety(
+                self.latest_depth_m, depth_age
+            )
+            if not safety.motion_allowed:
+                heartbeat = ControllerCommand(
+                    0.0, 0.0, 0.0, safety.reason, False, True
+                )
+            elif command.hard_stop:
+                heartbeat = command
+            elif now - last_color_time > 0.25:
+                # No fresh RGB result: continue forward, but do not hold a
+                # stale visual yaw correction.  This is the intended
+                # straight-running/no-line behavior.
+                heartbeat = ControllerCommand(
+                    max(0.0, command.vx),
+                    0.0,
+                    0.0,
+                    "RUNNING_VISION_FORWARD_NO_LINE",
+                    False,
+                    False,
+                )
+            else:
+                heartbeat = command
+
+            with self._output_lock:
+                self.audit_output.emit(heartbeat)
+                self.command_output.emit(heartbeat)
+
     def on_safety_timer(self) -> None:
         depth_age = time.monotonic() - self.latest_depth_time
-        self.latest_safety = self.depth_safety.evaluate(
-            self.latest_depth_m, depth_age
-        )
+        if self.mission == "runningvision110m":
+            self.latest_safety = self._evaluate_running_vision_safety(
+                self.latest_depth_m, depth_age
+            )
+        else:
+            self.latest_safety = self.depth_safety.evaluate(
+                self.latest_depth_m, depth_age
+            )
         self.publish_safety_status(self.latest_safety)
 
     def publish_safety_status(self, result: DepthSafetyResult) -> None:
@@ -573,6 +855,12 @@ class RealSenseLaneFollower(Node):
         return twist
 
     def destroy_node(self):
+        self._heartbeat_stop.set()
+        if (
+            self._heartbeat_thread is not None
+            and self._heartbeat_thread.is_alive()
+        ):
+            self._heartbeat_thread.join(timeout=1.0)
         self._status_stop.set()
         if self._status_thread.is_alive():
             self._status_thread.join(timeout=1.0)
@@ -585,11 +873,21 @@ class RealSenseLaneFollower(Node):
 def main() -> None:
     rclpy.init()
     node = RealSenseLaneFollower()
+    executor: MultiThreadedExecutor | None = None
     try:
-        rclpy.spin(node)
+        if node.mission == "runningvision110m":
+            # Keep Depth callbacks alive while RGB detection/annotation is
+            # busy. Other missions retain the original single-thread path.
+            executor = MultiThreadedExecutor(num_threads=3)
+            executor.add_node(node)
+            executor.spin()
+        else:
+            rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
+        if executor is not None:
+            executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
