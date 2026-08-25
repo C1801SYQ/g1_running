@@ -8,6 +8,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 CAMERA_PID=""
 AUDIT_UDP_ENABLED="${G1_AUDIT_UDP_ENABLED:-false}"
 AUDIT_MISSION="${G1_AUDIT_MISSION:-walk0p5m}"
+STATUS_PORT="${G1_VISION_STATUS_PORT:-15002}"
 TARGET_M="${G1_NUM7_TARGET_M:-1.00}"
 TARGET_M="$(python3 -c 'import sys; print(f"{float(sys.argv[1]):.2f}") ' "${TARGET_M}")"
 if [[ -n "${G1_NUM7_MAX_DURATION_S:-}" ]]; then
@@ -18,6 +19,9 @@ fi
 MAX_DURATION_S="$(python3 -c 'import sys; print(f"{float(sys.argv[1]):.1f}") ' "${MAX_DURATION_S}")"
 DISTANCE_SCALE="${G1_NUM7_DISTANCE_SCALE:-0.60}"
 CRUISE_SPEED_MPS="${G1_VISION_CRUISE_SPEED_MPS:-0.50}"
+SKILL6_RAMP_TO_1="${G1_SKILL6_RAMP_TO_1:-0.60}"
+SKILL6_RAMP_TO_3="${G1_SKILL6_RAMP_TO_3:-0.80}"
+SKILL6_RAMP_TO_MAX="${G1_SKILL6_RAMP_TO_MAX:-1.00}"
 
 cleanup() {
   if [[ -n "${CAMERA_PID}" ]] && kill -0 "${CAMERA_PID}" 2>/dev/null; then
@@ -88,9 +92,13 @@ cd "${PROJECT_ROOT}"
 python3 vision/scripts/run_realsense_ros2.py \
   --ros-args \
   -p mission:="${AUDIT_MISSION}" \
+  -p status_port:="${STATUS_PORT}" \
   -p num7_target_m:="${TARGET_M}" \
   -p num7_max_duration_s:="${MAX_DURATION_S}" \
   -p num7_distance_scale:="${DISTANCE_SCALE}" \
   -p cruise_speed_mps:="${CRUISE_SPEED_MPS}" \
+  -p skill6_ramp_to_1_s:="${SKILL6_RAMP_TO_1}" \
+  -p skill6_ramp_to_3_s:="${SKILL6_RAMP_TO_3}" \
+  -p skill6_ramp_to_max_s:="${SKILL6_RAMP_TO_MAX}" \
   -p command_output_enabled:=false \
   -p audit_udp_enabled:="${AUDIT_UDP_ENABLED}"
