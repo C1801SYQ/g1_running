@@ -197,10 +197,12 @@ class Skill6TransitionTests(unittest.TestCase):
             "class RLFSMStateRLVisionSprint100m", 1
         )[1].split("class RLFSMStateRLVisionWalk0p5m", 1)[0]
 
-        self.assertLess(
-            skill6.index("rl.HasLoadedPolicy(robot_config_path)"),
-            skill6.index("VisionSprintMode::SetEnabled(true)"),
-        )
+        enable_index = skill6.index("VisionSprintMode::SetEnabled(true)")
+        if "rl.HasLoadedPolicy(robot_config_path)" in skill6:
+            load_index = skill6.index("rl.HasLoadedPolicy(robot_config_path)")
+        else:
+            load_index = skill6.index("rl.InitRL(robot_config_path)")
+        self.assertLess(load_index, enable_index)
 
     def test_skill6_clears_stale_policy_targets(self) -> None:
         sdk_path = (

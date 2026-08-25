@@ -82,6 +82,9 @@ python scripts/run_unitree_camera_sim.py \
     --interface "${G1_RACE_INTERFACE}" \
     --status-port "${STATUS_PORT}" \
     --skill6-stabilize-seconds "${G1_SKILL6_STABILIZE_SECONDS:-0.60}" \
+    --skill6-ramp-to-1 "${G1_SKILL6_RAMP_TO_1:-0.60}" \
+    --skill6-ramp-to-3 "${G1_SKILL6_RAMP_TO_3:-0.80}" \
+    --skill6-ramp-to-max "${G1_SKILL6_RAMP_TO_MAX:-1.00}" \
     --camera-fps 30 \
     --depth-fps 10 \
     --viewer-fps 24 \
