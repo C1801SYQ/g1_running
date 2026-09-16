@@ -4,6 +4,20 @@
 
 ---
 
+## 工程入口 / Engineering entry points
+
+**任务：** 从策略训练、MuJoCo 验证到 G1 部署与视觉任务编排。
+**系统：** `robot_rl / clean_training → policy + config → rl_sar → vision`。
+
+| 你要做什么 | 从这里开始 |
+| --- | --- |
+| 无机器人快速检查代码 | `python -m pytest -q`（依赖见工程指南） |
+| 检查发布策略文件与关节配置 | `python tools/check_release.py` |
+| 配置训练 / 仿真 / 实机环境 | [工程运行指南](docs/ENGINEERING.md) |
+
+**下方 2026-08-25 内容为历史工作区快照。** “当前训练”“自启动”“已验收”等记录属于当时环境，
+不能视为新克隆机器的实时状态，也不代表本轮重新验证了运动性能。
+
 ## 项目概述
 
 在 G1 21 自由度跑步策略基础上扩展为 **29 自由度**全身跑步，训练策略实现 0~5.1 m/s 变速跑步 + 转向，并通过 rl_sar 框架部署到 MuJoCo 仿真和实体机器人。当前 GitHub 发布基线统一为 `main`。
@@ -22,7 +36,7 @@ Skill 6/7 状态机与视觉流程；当前 `policy.pt` 的发布元数据见
 > 和导出方式以 `source.txt`、`config.yaml`、`deploy.yaml` 为准；当前策略 SHA256 为
 > `c4890005e430895feeb1aa8a80fa71f5e7fe96f7c7b45652bb709807d24930b2`。
 
-## Skill 6 最新状态（2026-08-25）
+## Skill 6 历史记录（2026-08-25）
 
 主线新增并整理了 Skill 6 视觉百米冲刺链路。Skill 6 的目标行为是：按键 `6`
 进入已经加载的 Skill 5 Running 策略后，持续执行约 110 m 的前进任务；白线识别
@@ -62,7 +76,7 @@ Skill 6/7 状态机与视觉流程；当前 `policy.pt` 的发布元数据见
 | [`docs/JAKOTICS_AMP_MIGRATION.md`](docs/JAKOTICS_AMP_MIGRATION.md) | Jakotics AMP-Run 训练、sim2sim 与 rl_sar 适配路线 |
 | [`docs/AMP_RUNNING_BASELINE_MIGRATION.md`](docs/AMP_RUNNING_BASELINE_MIGRATION.md) | AMP_Running_baseline 训练、导出和对比路线 |
 
-## 当前状态（2026-08-25）
+## 历史工作区状态（2026-08-25）
 
 | 项目 | 状态 |
 |------|------|
